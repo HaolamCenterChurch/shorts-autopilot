@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>Shorts Autopilot</title>
+  <style>
+    :root {
+      --bg-main: #0f172a;
+      --bg-panel: #1e293b;
+      --bg-card: #334155;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --border: #475569;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+    body { background-color: var(--bg-main); color: var(--text-main); display: flex; height: 100vh; overflow: hidden; }
+
+    /* Layout */
+    #sidebar { width: 260px; background: var(--bg-panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+    #main-content { flex: 1; display: flex; flex-direction: column; overflow-y: auto; position: relative; }
+    #ai-panel { width: 320px; background: var(--bg-panel); border-left: 1px solid var(--border); display: flex; flex-direction: column; }
+
+    .header-bar { padding: 16px 20px; border-bottom: 1px solid var(--border); font-weight: 700; font-size: 1.1rem; display: flex; justify-content: space-between; align-items: center; }
+    .nav-item { padding: 12px 20px; color: var(--text-muted); cursor: pointer; display: flex; align-items: center; gap: 10px; transition: 0.2s; font-size: 0.95rem; }
+    .nav-item:hover, .nav-item.active { background: var(--bg-card); color: var(--text-main); }
+    .nav-item.active { border-left: 4px solid var(--accent); }
+
+    .container { padding: 24px; max-width: 900px; margin: 0 auto; width: 100%; }
+    .card { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 20px; }
+    .btn { background: var(--accent); color: #fff; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 0.9rem; font-weight: 600; transition: 0.2s; display: inline-flex; align-items: center; gap: 6px; }
+    .btn:hover { background: var(--accent-hover); }
+    .btn-secondary { background: var(--bg-card); border: 1px solid var(--border); }
+    .btn-secondary:hover { background: #475569; }
+    .btn-success { background: var(--success); }
+    .btn-success:hover { background: #059669; }
+    .btn-small { padding: 4px 10px; font-size: 0.8rem; }
+
+    .drop-zone { border: 2px dashed var(--border); border-radius: 8px; padding: 40px 20px; text-align: center; cursor: pointer; transition: 0.2s; }
+    .drop-zone:hover { border-color: var(--accent); background: rgba(59, 130, 246, 0.05); }
+
+    /* Plans Grid */
+    .plans-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; margin-top: 16px; }
+    .plan-card { background: var(--bg-card); border-radius: 8px; padding: 16px; border: 2px solid transparent; cursor: pointer; transition: 0.2s; display: flex; flex-direction: column; justify-content: space-between; }
+    .plan-card:hover { border-color: var(--accent); }
+    .plan-card.selected { border-color: var(--accent); background: #26354a; }
+    .plan-badge { display: inline-block; background: var(--accent); color: #fff; font-size: 0.75rem; font-weight: 700; padding: 2px 8px; border-radius: 4px; margin-bottom: 8px; align-self: flex-start; }
+
+    /* AI Side Panel */
+    .ai-chat-history { flex: 1; padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+    .chat-msg { padding: 10px 14px; border-radius: 8px; font-size: 0.88rem; line-height: 1.4; max-width: 90%; }
+    .chat-msg.user { background: var(--accent); color: #fff; align-self: flex-end; }
+    .chat-msg.ai { background: var(--bg-card); color: var(--text-main); align-self: flex-start; border: 1px solid var(--border); }
+    .ai-input-box { padding: 12px; border-top: 1px solid var(--border); background: var(--bg-panel); display: flex; flex-direction: column; gap: 8px; }
+    .ai-input-box textarea { width: 100%; height: 70px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; color: var(--text-main); padding: 8px; font-size: 0.85rem; resize: none; outline: none; }
+    .ai-input-box textarea:focus { border-color: var(--accent); }
+
+    /* Doctor list */
+    .doc-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: var(--bg-card); border-radius: 6px; margin-bottom: 8px; }
+    .status-ok { color: var(--success); font-weight: 700; }
+    .status-fail { color: var(--danger); font-weight: 700; }
+
+    /* Progress & Notification */
+    #notification { position: fixed; top: 20px; right: 340px; padding: 10px 18px; border-radius: 6px; font-size: 0.9rem; font-weight: 600; display: none; z-index: 999; }
+    .notify-info { background: var(--accent); color: #fff; }
+    .notify-error { background: var(--danger); color: #fff; }
+    .notify-success { background: var(--success); color: #fff; }
+  </style>
+</head>
+<body>
+
+  <!-- 좌측 내비게이션 -->
+  <div id="sidebar">
+    <div class="header-bar">Shorts Autopilot</div>
+    <div class="nav-item active" onclick="showTab('step-video')">1. 원본 영상 & 전사</div>
+    <div class="nav-item" onclick="showTab('step-plan')">2. OREO 기획 (3안)</div>
+    <div class="nav-item" onclick="showTab('step-subtitle')">3. 2단 자막 검토</div>
+    <div class="nav-item" onclick="showTab('step-render')">4. 세로 렌더 & 검증</div>
+    <div class="nav-item" onclick="showTab('step-doctor')">⚙️ 시스템 진단 (Doctor)</div>
+    
+    <div style="margin-top: auto; padding: 16px; border-top: 1px solid var(--border); font-size: 0.8rem; color: var(--text-muted);">
+      <div>무음 자동 제거: <b style="color:var(--success)">기본 켜짐</b></div>
+      <div>출력 포맷: 9:16 세로 (1080x1920)</div>
+    </div>
+  </div>
+
+  <!-- 메인 워크스페이스 -->
+  <div id="main-content">
+    <div id="notification"></div>
+
+    <!-- 1. 원본 영상 & 전사 -->
+    <div id="step-video" class="container tab-content">
+      <div class="card">
+        <h2>🎥 원본 강연/영상 선택</h2>
+        <p style="color: var(--text-muted); margin: 8px 0 16px;">16:9 가로 영상을 드래그하거나 선택하여 Whisper로 전사를 시작합니다.</p>
+        
+        <div class="drop-zone" onclick="chooseVideoFile()">
+          <div style="font-size: 2rem; margin-bottom: 8px;">📁</div>
+          <div id="video-path-label" style="font-weight: 600;">클릭하여 비디오 선택 또는 드래그 앤 드롭</div>
+        </div>
+
+        <div style="margin-top: 16px; display: flex; gap: 10px;">
+          <button class="btn" onclick="startTranscribe(false)">전사 시작 (캐시 우선)</button>
+          <button class="btn btn-secondary" onclick="startTranscribe(true)">다시 전사 (강제)</button>
+        </div>
+      </div>
+
+      <div class="card" id="transcript-card" style="display: none;">
+        <h3>전사 내용 확인</h3>
+        <textarea id="transcript-viewer" readonly style="width: 100%; height: 200px; background: var(--bg-card); color: var(--text-main); border: 1px solid var(--border); border-radius: 6px; padding: 10px; margin-top: 10px; resize: vertical;"></textarea>
+        <div style="margin-top: 12px; text-align: right;">
+          <button class="btn btn-success" onclick="generatePlans()">다음: OREO 쇼츠 3안 기획 생성 ➔</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. OREO 기획안 -->
+    <div id="step-plan" class="container tab-content" style="display: none;">
+      <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <h2>💡 OREO 구조 쇼츠 3안 (A/B/C)</h2>
+          <button class="btn btn-secondary btn-small" onclick="generatePlans()">기획안 재생성</button>
+        </div>
+        <p style="color: var(--text-muted); margin: 8px 0;">결론을 맨 앞에 배치한 고임팩트 3가지 버전입니다. 마음에 드는 안을 선택하세요.</p>
+        
+        <div id="plans-container" class="plans-grid">
+          <div style="color: var(--text-muted);">전사 완료 후 기획안을 생성해 주세요.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3. 자막 검토 -->
+    <div id="step-subtitle" class="container tab-content" style="display: none;">
+      <div class="card">
+        <h2>📝 영/한 2단 자막 호흡 검토</h2>
+        <p style="color: var(--text-muted); margin: 8px 0 16px;">10~16자 호흡 블록 및 영문 번역 라인입니다. 우측 AI 패널로 상시 수정할 수 있습니다.</p>
+        <div id="subtitles-list" style="display: flex; flex-direction: column; gap: 8px; max-height: 400px; overflow-y: auto;">
+          <div style="color: var(--text-muted);">선택된 기획안의 자막을 로드 중입니다...</div>
+        </div>
+        <div style="margin-top: 16px; text-align: right;">
+          <button class="btn btn-success" onclick="startRender()">다음: 9:16 완성본 MP4 렌더링 ➔</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4. 렌더 & 검증 -->
+    <div id="step-render" class="container tab-content" style="display: none;">
+      <div class="card">
+        <h2>🚀 세로 완성본 MP4 렌더링 & 검증</h2>
+        <div id="render-status" style="margin: 16px 0; padding: 14px; background: var(--bg-card); border-radius: 6px; font-weight: 600;">대기 중...</div>
+        <div style="display: flex; gap: 10px;">
+          <button class="btn btn-success" id="btn-render-action" onclick="startRender()">렌더링 시작</button>
+          <button class="btn btn-secondary" onclick="openOutputFolder()">결과 폴더 열기</button>
+        </div>
+      </div>
+      <div class="card" id="verify-card" style="display: none;">
+        <h3>대본 일치성 검증 리포트</h3>
+        <div id="verify-report-content" style="margin-top: 10px; font-size: 0.9rem; line-height: 1.6; white-space: pre-wrap;"></div>
+      </div>
+    </div>
+
+    <!-- 5. Doctor 시스템 진단 -->
+    <div id="step-doctor" class="container tab-content" style="display: none;">
+      <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <h2>⚙️ 시스템 환경 및 의존성 진단</h2>
+          <button class="btn btn-secondary btn-small" onclick="loadDoctor()">다시 검사</button>
+        </div>
+        <p style="color: var(--text-muted); margin: 8px 0 16px;">쇼츠 오토파일럿에 필요한 도구와 AI CLI 설치 상태를 점검합니다.</p>
+        
+        <div id="doctor-list"></div>
+
+        <div style="margin-top: 16px; display: flex; gap: 10px;">
+          <button class="btn" onclick="runAutoFix()">자동 해결 시도 (--auto)</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>🤖 AI 백엔드 CLI 설정</h3>
+        <p style="color: var(--text-muted); margin: 8px 0 12px;">사용 중인 LLM CLI를 선택하거나 지정합니다.</p>
+        <div id="ai-backends-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 우측 상시 AI 수정 패널 -->
+  <div id="ai-panel">
+    <div class="header-bar">
+      <span>✨ 상시 AI 어시스턴트</span>
+    </div>
+    <div class="ai-chat-history" id="ai-history">
+      <div class="chat-msg ai">
+        현재 보고 있는 산출물(기획안, 자막, 대본 등)을 자유롭게 수정 요청하세요.<br>
+        예: "도입부 훅을 더 강렬한 질문으로 바꿔줘", "자막 3번째 블록 영어를 간결하게 해줘"
+      </div>
+    </div>
+    <div class="ai-input-box">
+      <textarea id="ai-instruction" placeholder="현재 단계 산출물에 대한 AI 수정 지시를 입력하세요..."></textarea>
+      <button class="btn btn-small" style="align-self: flex-end;" onclick="submitAiInstruction()">AI에게 수정 요청</button>
+    </div>
+  </div>
+
+  <script>
+    let currentVideoPath = null;
+    let loadedPlans = [];
+    let selectedPlanIndex = 0;
+    let currentActiveTab = 'step-video';
+
+    function notify(msg, type = 'info') {
+      const el = document.getElementById('notification');
+      el.className = `notify-${type}`;
+      el.textContent = msg;
+      el.style.display = 'block';
+      setTimeout(() => { el.style.display = 'none'; }, 3500);
+    }
+
+    function showTab(tabId) {
+      document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
+      document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+      document.getElementById(tabId).style.display = 'block';
+      currentActiveTab = tabId;
+      
+      const navIdx = {'step-video':0, 'step-plan':1, 'step-subtitle':2, 'step-render':3, 'step-doctor':4}[tabId];
+      if (navIdx !== undefined) document.querySelectorAll('.nav-item')[navIdx].classList.add('active');
+
+      if (tabId === 'step-doctor') loadDoctor();
+    }
+
+    window.onFileDropped = function(path) {
+      currentVideoPath = path;
+      document.getElementById('video-path-label').textContent = path;
+      notify('영상 드롭 완료: ' + path, 'success');
+    };
+
+    async function chooseVideoFile() {
+      const res = await pywebview.api.choose_video();
+      if (res && res.path) {
+        currentVideoPath = res.path;
+        document.getElementById('video-path-label').textContent = res.path;
+        notify('영상 선택 완료', 'success');
+      }
+    }
+
+    async function startTranscribe(force = false) {
+      if (!currentVideoPath) return notify('영상을 먼저 선택해 주세요.', 'error');
+      notify('전사 시작 중...', 'info');
+      const res = await pywebview.api.transcribe(currentVideoPath, force);
+      if (res.ok) {
+        document.getElementById('transcript-card').style.display = 'block';
+        document.getElementById('transcript-viewer').value = res.text;
+        notify('전사 완료 (' + (res.cached ? '캐시 재사용' : '새 전사') + ')', 'success');
+      } else {
+        notify('전사 실패: ' + res.error, 'error');
+      }
+    }
+
+    async function generatePlans() {
+      notify('AI OREO 기획안 3안 생성 중...', 'info');
+      const res = await pywebview.api.generate_plans();
+      if (res.ok) {
+        loadedPlans = res.plans;
+        renderPlansGrid();
+        showTab('step-plan');
+        notify('기획안 3안 생성 완료!', 'success');
+      } else {
+        notify('기획안 생성 실패: ' + res.error, 'error');
+      }
+    }
+
+    function renderPlansGrid() {
+      const container = document.getElementById('plans-container');
+      container.innerHTML = '';
+      loadedPlans.forEach((plan, idx) => {
+        const card = document.createElement('div');
+        card.className = `plan-card ${idx === selectedPlanIndex ? 'selected' : ''}`;
+        card.onclick = () => selectPlan(idx);
+        card.innerHTML = `
+          <div>
+            <div class="plan-badge">${plan.id || (idx+1)}안: ${plan.주제 || '쇼츠 기획'}</div>
+            <p style="font-size: 0.9rem; margin-bottom: 8px;">${plan.한줄설명 || ''}</p>
+            <p style="font-size: 0.8rem; color: var(--text-muted);">${(plan.script || '').slice(0, 80)}...</p>
+          </div>
+          <div style="margin-top: 12px; text-align: right;">
+            <button class="btn btn-small" onclick="event.stopPropagation(); loadSubtitles(${idx});">자막 및 렌더 ➔</button>
+          </div>
+        `;
+        container.appendChild(card);
+      });
+    }
+
+    function selectPlan(idx) {
+      selectedPlanIndex = idx;
+      renderPlansGrid();
+    }
+
+    async function loadSubtitles(planIdx) {
+      selectedPlanIndex = planIdx;
+      showTab('step-subtitle');
+      notify('자막 청크 및 영문 번역 생성 중...', 'info');
+      const res = await pywebview.api.generate_subtitles_for_plan(planIdx);
+      if (res.ok) {
+        const list = document.getElementById('subtitles-list');
+        list.innerHTML = '';
+        res.chunks.forEach((c, i) => {
+          const item = document.createElement('div');
+          item.style.padding = '8px 12px';
+          item.style.background = 'var(--bg-card)';
+          item.style.borderRadius = '6px';
+          item.style.borderLeft = c.hl ? '4px solid #eab308' : '4px solid transparent';
+          item.innerHTML = `
+            <div style="font-weight: 600; font-size: 0.95rem;">${c.ko} ${c.hl ? '⭐' : ''}</div>
+            <div style="font-size: 0.82rem; color: var(--text-muted);">${c.en || ''}</div>
+          `;
+          list.appendChild(item);
+        });
+        notify('자막 로드 완료', 'success');
+      } else {
+        notify('자막 생성 실패: ' + res.error, 'error');
+      }
+    }
+
+    async function startRender() {
+      showTab('step-render');
+      document.getElementById('render-status').textContent = '렌더링 파이프라인 진행 중... (무음 제거, 세로 크롭, 자막 번인)';
+      const res = await pywebview.api.render_short(selectedPlanIndex);
+      if (res.ok) {
+        document.getElementById('render-status').innerHTML = `✅ 렌더링 완료!<br>비디오 파일: <code>${res.result.video}</code>`;
+        document.getElementById('verify-card').style.display = 'block';
+        document.getElementById('verify-report-content').textContent = `검증 완료: ${res.result.report}`;
+        notify('쇼츠 생성 완료!', 'success');
+      } else {
+        document.getElementById('render-status').textContent = '❌ 실패: ' + res.error;
+        notify('렌더링 에러', 'error');
+      }
+    }
+
+    window.onRenderProgress = function(msg) {
+      document.getElementById('render-status').textContent = msg;
+    };
+
+    async function openOutputFolder() {
+      await pywebview.api.open_folder(currentVideoPath ? currentVideoPath.substring(0, currentVideoPath.lastIndexOf('/')) : '.');
+    }
+
+    async function submitAiInstruction() {
+      const input = document.getElementById('ai-instruction');
+      const prompt = input.value.trim();
+      if (!prompt) return;
+
+      const history = document.getElementById('ai-history');
+      const userMsg = document.createElement('div');
+      userMsg.className = 'chat-msg user';
+      userMsg.textContent = prompt;
+      history.appendChild(userMsg);
+      input.value = '';
+
+      let targetType = currentActiveTab;
+      let contentData = "";
+      if (targetType === 'step-plan') contentData = JSON.stringify(loadedPlans);
+      else if (targetType === 'step-subtitle') contentData = JSON.stringify(loadedPlans[selectedPlanIndex] || {});
+      else contentData = document.getElementById('transcript-viewer').value;
+
+      const res = await pywebview.api.ai_assist_edit(targetType, contentData, prompt);
+      const aiMsg = document.createElement('div');
+      aiMsg.className = 'chat-msg ai';
+      if (res.ok) {
+        aiMsg.textContent = res.result;
+      } else {
+        aiMsg.textContent = '수정 실패: ' + res.error;
+      }
+      history.appendChild(aiMsg);
+      history.scrollTop = history.scrollHeight;
+    }
+
+    async function loadDoctor() {
+      const diag = await pywebview.api.get_doctor_status();
+      const list = document.getElementById('doctor-list');
+      list.innerHTML = '';
+      diag.items.forEach(it => {
+        const row = document.createElement('div');
+        row.className = 'doc-item';
+        row.innerHTML = `
+          <div>
+            <div style="font-weight: 600;">${it.name}</div>
+            <div style="font-size: 0.8rem; color: var(--text-muted);">${it.detail}</div>
+            ${!it.ok ? `<div style="font-size: 0.75rem; color: var(--warning); margin-top: 4px;">가이드: <code>${it.guide}</code></div>` : ''}
+          </div>
+          <div class="${it.ok ? 'status-ok' : 'status-fail'}">${it.ok ? '✓ OK' : '✗ 미발견'}</div>
+        `;
+        list.appendChild(row);
+      });
+
+      const be = await pywebview.api.get_ai_backends();
+      const beList = document.getElementById('ai-backends-list');
+      beList.innerHTML = '';
+      be.backends.forEach(b => {
+        const item = document.createElement('div');
+        item.style.padding = '8px';
+        item.style.display = 'flex';
+        item.style.justifyContent = 'space-between';
+        item.innerHTML = `
+          <span>${b.label} (${b.available ? '설치됨' : '미설치'})</span>
+          <button class="btn btn-secondary btn-small" onclick="setAiCmd('${b.cmd.join(' ')}')">선택</button>
+        `;
+        beList.appendChild(item);
+      });
+    }
+
+    async function runAutoFix() {
+      notify('자동 설치 시도 중...', 'info');
+      const res = await pywebview.api.run_auto_fix();
+      notify('자동 조치 완료', 'success');
+      loadDoctor();
+    }
+
+    async function setAiCmd(cmdStr) {
+      await pywebview.api.set_ai_backend(cmdStr);
+      notify('AI 백엔드 설정 완료: ' + cmdStr, 'success');
+    }
+  </script>
+</body>
+</html>
