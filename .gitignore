@@ -33,3 +33,5 @@ ENV/
 *.edl
 _work/
 output/
+.DS_Store
+.claude/

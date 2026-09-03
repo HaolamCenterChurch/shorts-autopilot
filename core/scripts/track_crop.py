@@ -2,6 +2,7 @@
 """클린 마스터(16:9)에서 인물을 추적해 9:16 크롭 궤적을 만든다."""
 import argparse
 import json
+import os
 import sys
 
 import cv2
@@ -10,9 +11,9 @@ import numpy as np
 FPS = 30
 DET_W, DET_H = 960, 540
 SCALE = 3840 / DET_W  # 원본 3840 스케일로 되돌리는 배율 (=4)
-MAX_SPEED_PX_S = 250.0
-EMA_ALPHA = 0.12
-DEADZONE_RATIO = 0.10
+MAX_SPEED_PX_S = 180.0
+EMA_ALPHA = 0.08
+DEADZONE_RATIO = 0.22
 FACE_MARGIN_RATIO = 1.2
 
 
@@ -34,6 +35,7 @@ def detect_faces(video_path, model_path, sample_fps):
     detector.setInputSize((DET_W, DET_H))
 
     cx_samples = []  # (frame_idx, cx, w) 얼굴 중심/너비, 3840 스케일
+    prev_cx, prev_cy = None, None
     frame_idx = 0
     sampled_count = 0
     detected_count = 0
@@ -48,10 +50,26 @@ def detect_faces(video_path, model_path, sample_fps):
                 _, faces = detector.detect(small)
                 sampled_count += 1
                 if faces is not None and len(faces) > 0:
-                    best = max(faces, key=lambda f: f[2] * f[3])
+                    # 세로/가로 비율 체크(사람 얼굴은 세로가 긴 편, 헤어 악세서리 등 원형/가로형 오검출 제외)
+                    valid_faces = [f for f in faces if f[14] >= 0.55 and (f[3] / f[2]) >= 0.90]
+                    if not valid_faces:
+                        valid_faces = faces
+
+                    if prev_cx is None:
+                        best = max(valid_faces, key=lambda f: f[14])
+                    else:
+                        def face_cost(f):
+                            cx_val = (f[0] + f[2] / 2) * SCALE
+                            cy_val = (f[1] + f[3] / 2) * SCALE
+                            dist = np.hypot(cx_val - prev_cx, cy_val - prev_cy)
+                            return dist - f[14] * 250.0
+                        best = min(valid_faces, key=face_cost)
+
                     x, y, w, h = best[0], best[1], best[2], best[3]
                     cx = (x + w / 2) * SCALE
+                    cy = (y + h / 2) * SCALE
                     fw = w * SCALE
+                    prev_cx, prev_cy = cx, cy
                     cx_samples.append((frame_idx, cx, fw))
                     detected_count += 1
                 else:
@@ -184,71 +202,129 @@ def enforce_corridor(x_desired, face_cx, face_w, crop_w, max_step,
     return out
 
 
-def quantize_points(x, max_points, fps=FPS):
-    """변화점이 max_points 이하가 될 때까지 x 를 계단으로 양자화한다.
+def find_shot_boundaries(in_path, cuts_path, plan_path, total_duration):
+    """cuts.json 및 plan.json 기반으로 마스터 영상의 모든 컷(샷) 경계를 추출한다."""
+    master_cuts = [0.0]
 
-    변화량이 항상 양자화 스텝과 같아지므로, 예전처럼 '가장 작은 변화를 지운다'
-    방식과 달리 큰 점프가 생기지 않는다.
+    # 1. plan.json 의 원본 세그먼트 경계 추출
+    raw_cuts = []
+    if plan_path and os.path.exists(plan_path):
+        try:
+            with open(plan_path, "r", encoding="utf-8") as f:
+                pdata = json.load(f)
+            raw_cum = 0.0
+            for s, e in pdata.get("segments", [])[:-1]:
+                raw_cum += (e - s)
+                raw_cuts.append(raw_cum)
+        except Exception as err:
+            log(f"[track_crop] plan.json 읽기 실패: {err}")
+
+    # 2. cuts.json (무음 제거 컷 구간) 반영
+    if cuts_path and os.path.exists(cuts_path):
+        try:
+            with open(cuts_path, "r", encoding="utf-8") as f:
+                cdata = json.load(f)
+            master_t = 0.0
+            for k0, k1 in cdata.get("keeps", []):
+                dur = k1 - k0
+                for rc in raw_cuts:
+                    if k0 < rc < k1:
+                        split_master = master_t + (rc - k0)
+                        master_cuts.append(split_master)
+                master_t += dur
+                master_cuts.append(master_t)
+        except Exception as err:
+            log(f"[track_crop] cuts.json 읽기 실패: {err}")
+
+    master_cuts.append(total_duration)
+    master_cuts = sorted(list(set(master_cuts)))
+
+    shots = []
+    for i in range(len(master_cuts) - 1):
+        c0, c1 = master_cuts[i], master_cuts[i + 1]
+        if c1 - c0 <= 0.15:
+            if shots:
+                shots[-1] = (shots[-1][0], c1)
+            else:
+                shots.append((c0, c1))
+        else:
+            shots.append((c0, c1))
+
+    if not shots:
+        shots = [(0.0, total_duration)]
+    return shots
+
+
+def build_cut_aware_expr(cut_infos, crop_w):
+    """컷 경계를 인지하는 최종 ffmpeg crop expression 생성.
+
+    1. 정적 샷(Static Shot): 프레임 내내 고정 좌표 유지
+    2. 이동 샷(Walking Shot): 샷 내부에서만 순방향 S-커브로 이동 (절대 컷 경계를 넘지 않음)
+    3. 컷 전환점: 컷 프레임에서 정확하게 다음 샷 구도로 순시 전환 (자연스러운 점프 컷)
     """
-    step = 2
-    while True:
-        xq = np.round(np.asarray(x, dtype=np.float64) / step) * step
-        n_changes = 1 + int(np.count_nonzero(np.diff(xq)))
-        if n_changes <= max_points or step >= 64:
-            return xq.astype(int), step
-        step += 2
+    if not cut_infos:
+        return f"{1920 - crop_w / 2:.1f}", [(0.0, 1920 - crop_w / 2)]
 
+    first = cut_infos[0]
+    cur_x = first[3] if first[0] == "static" else first[3][0][1]
+    expr = f"{cur_x:.1f}"
+    all_points = [(0.0, cur_x)]
 
-def build_expr(x_frame, max_points=400):
-    n = len(x_frame)
-    points = [(0.0, float(x_frame[0]))]
-    for i in range(1, n):
-        if x_frame[i] != x_frame[i - 1]:
-            points.append((i / FPS, float(x_frame[i])))
+    for c_type, t0, t1, data in cut_infos:
+        if c_type == "static":
+            dx = data - cur_x
+            if abs(dx) >= 1.0 and t0 > 0:
+                expr += f"+({dx:.1f})*gte(t\\,{t0:.4f})"
+                cur_x = data
+            all_points.append((t0, cur_x))
+        elif c_type == "walk":
+            start_x = data[0][1]
+            dx_cut = start_x - cur_x
+            if abs(dx_cut) >= 1.0 and t0 > 0:
+                expr += f"+({dx_cut:.1f})*gte(t\\,{t0:.4f})"
+                cur_x = start_x
+            all_points.append((t0, cur_x))
 
-    while len(points) > max_points:
-        # 값 변화가 가장 작은 지점을 병합(제거)해서 개수를 줄인다
-        min_idx, min_delta = 1, None
-        for i in range(1, len(points)):
-            delta = abs(points[i][1] - points[i - 1][1])
-            if min_delta is None or delta < min_delta:
-                min_delta = delta
-                min_idx = i
-        del points[min_idx]
+            for j in range(1, len(data)):
+                pt_t0, pt_x0 = data[j - 1]
+                pt_t1, pt_x1 = data[j]
+                dt = pt_t1 - pt_t0
+                dx = pt_x1 - pt_x0
+                if abs(dx) >= 1.0 and dt > 0:
+                    # 등속도 선형 이동: dx/dt = 일정 (가속/감속 없는 완벽한 등속 글라이드)
+                    expr += f"+({dx:.1f})*clip((t-{pt_t0:.4f})/{dt:.4f}\\,0\\,1)"
+                    cur_x += dx
+                    all_points.append((pt_t1, cur_x))
 
-    expr = f"{points[0][1]:.1f}"
-    max_jump = 0.0
-    for i in range(1, len(points)):
-        prev_v = points[i - 1][1]
-        v = points[i][1]
-        t = points[i][0]
-        max_jump = max(max_jump, abs(v - prev_v))
-        expr += f"+({v - prev_v:.1f})*gte(t\\,{t:.4f})"
-    if max_jump > 24:
-        log(f"[track_crop] ⚠ 크롭이 한 번에 {max_jump:.0f}px 튄다 — 확인 필요")
-    return expr, points
+    return expr, all_points
 
 
 def main():
-    ap = argparse.ArgumentParser(description="인물 추적 9:16 크롭 궤적 생성")
+    ap = argparse.ArgumentParser(description="인물 추적 9:16 크롭 궤적 생성 (컷 인지형 순방향 트래킹)")
     ap.add_argument("--in", dest="in_path", required=True)
     ap.add_argument("--out-cmd", required=True)
     ap.add_argument("--out-json", required=True)
     ap.add_argument("--crop-w", type=int, default=1216)
     ap.add_argument("--sample-fps", type=float, default=10)
     ap.add_argument("--model", required=True)
+    ap.add_argument("--cuts", default=None, help="cuts.json 경로")
+    ap.add_argument("--plan", default=None, help="plan.json 경로")
     args = ap.parse_args()
 
     crop_w = args.crop_w
     total_frames, samples, det_rate = detect_faces(
         args.in_path, args.model, args.sample_fps)
+    total_dur = total_frames / float(FPS)
+
+    cuts_path = args.cuts or (args.in_path + ".cuts.json")
+    plan_path = args.plan
 
     if not samples:
         log("[track_crop] 검출 샘플 없음 -> 화면 중앙 고정")
-        x_frame = np.full(total_frames, np.clip(1920 - crop_w / 2, 0,
-                                                  3840 - crop_w))
+        x_frame = np.full(total_frames, np.clip(1920 - crop_w / 2, 0, 3840 - crop_w))
         x_frame = (np.round(x_frame / 2) * 2).astype(int)
-        save_outputs(args, total_frames, x_frame, crop_w, det_rate)
+        expr = f"{x_frame[0]:.1f}"
+        save_outputs(args, total_frames, x_frame, expr, [(0.0, float(x_frame[0]))], crop_w, det_rate)
         return
 
     idxs = [s[0] for s in samples]
@@ -257,15 +333,14 @@ def main():
 
     if all(np.isnan(v) for v in cx_vals):
         log("[track_crop] 전부 미검출 -> 화면 중앙 고정")
-        x_frame = np.full(total_frames, np.clip(1920 - crop_w / 2, 0,
-                                                  3840 - crop_w))
+        x_frame = np.full(total_frames, np.clip(1920 - crop_w / 2, 0, 3840 - crop_w))
         x_frame = (np.round(x_frame / 2) * 2).astype(int)
-        save_outputs(args, total_frames, x_frame, crop_w, det_rate)
+        expr = f"{x_frame[0]:.1f}"
+        save_outputs(args, total_frames, x_frame, expr, [(0.0, float(x_frame[0]))], crop_w, det_rate)
         return
 
     cx_interp = interp_nan(idxs, cx_vals)
     w_interp = interp_nan(idxs, w_vals)
-    # 결측 폭은 대체값(중앙값)으로 채운다
     if np.isnan(w_interp).any():
         fill_w = np.nanmedian(w_interp) if not np.all(np.isnan(w_interp)) else crop_w * 0.3
         w_interp = np.where(np.isnan(w_interp), fill_w, w_interp)
@@ -279,26 +354,126 @@ def main():
     face_cx_full = np.interp(frame_times, sample_times, cx_med)
     face_w_full = np.interp(frame_times, sample_times, w_med)
 
-    cam_arr = compute_cam_trajectory(face_cx_full, face_w_full, crop_w)
-    x_full = np.clip(cam_arr - crop_w / 2, 0, 3840 - crop_w)
+    # 컷 경계 탐색
+    shots = find_shot_boundaries(args.in_path, cuts_path, plan_path, total_dur)
+    log(f"[track_crop] 총 {len(shots)}개 컷(샷) 분할 프레이밍 시작")
 
-    sigma = (0.7 * FPS) / 3.0
-    x_smooth = gaussian_smooth(x_full, sigma)
+    cut_infos = []
+    last_static_x = None
 
-    # 스무딩된 궤적을 '실현 가능 구간' 안에서 속도 제한으로 따라간다.
-    max_step = MAX_SPEED_PX_S / FPS
-    x_final = enforce_corridor(x_smooth, face_cx_full, face_w_full, crop_w,
-                               max_step)
-    x_frame, q_step = quantize_points(x_final, 400)
-    x_frame = np.clip(x_frame, 0, int((3840 - crop_w) // 2 * 2))
-    log(f"[track_crop] 양자화 스텝 {q_step}px")
+    for c0, c1 in shots:
+        dur = c1 - c0
+        f0 = int(round(c0 * FPS))
+        f1 = min(int(round(c1 * FPS)), total_frames)
+        if f0 >= f1:
+            continue
 
-    save_outputs(args, total_frames, x_frame, crop_w, det_rate)
+        clip_cx = face_cx_full[f0:f1]
+        clip_w = face_w_full[f0:f1]
+        spread = float(np.max(clip_cx) - np.min(clip_cx))
+
+        # 정적 샷(발화 중심 제자리) vs 이동 샷(실제 칠판 이동)
+        if dur < 3.5 or spread <= 280.0:
+            med_cx = float(np.median(clip_cx))
+            cam_x = np.clip(med_cx - crop_w / 2.0, 0, 3840 - crop_w)
+            cam_x = round(cam_x / 2.0) * 2.0
+            # 이전 정적 샷과 위치 차이가 적으면(140px 미만) 동일 위치로 락(Lock)하여 호흡 컷 시 불필요한 미세 점프 방지
+            if last_static_x is not None and abs(cam_x - last_static_x) < 140.0:
+                cam_x = last_static_x
+            last_static_x = cam_x
+            cut_infos.append(("static", c0, c1, cam_x))
+        else:
+            n_clip = f1 - f0
+            # 이동 샷: 등속도(Constant Speed) 트래킹
+            # 이동할 때는 일정 속도(PAN_SPEED = 200.0 px/s)로 직선 등속 이동(Linear Glide)
+            # 가속/감속이나 속도 급변 없이 일정한 속도로만 편안하게 이동한다.
+            PAN_SPEED = 480.0  # px / sec (민첩한 등속 패닝 속도: 걷는 속도에 맞춰 신속하게 도달)
+            step = PAN_SPEED / FPS
+            deadzone = 0.10 * crop_w  # ~120px (인물이 항상 중앙 10% 내에 잘 머물도록 좁힌 데드존)
+            cam = np.clip(clip_cx[0] - crop_w / 2.0, 0, 3840 - crop_w)
+            out = np.empty(n_clip)
+            for cf in range(n_clip):
+                target = np.clip(clip_cx[cf] - crop_w / 2.0, 0, 3840 - crop_w)
+                diff = target - cam
+                if abs(diff) > deadzone:
+                    direction = 1.0 if diff > 0 else -1.0
+                    cam += direction * step
+                    if (direction > 0 and cam > target) or (direction < 0 and cam < target):
+                        cam = target
+                out[cf] = cam
+
+            # 선형 등속 단순화
+            t_arr = np.arange(n_clip) / float(FPS) + c0
+
+            def rdp_linear(i0, i1, err=4.0):
+                if i1 <= i0 + 1:
+                    return [i0, i1]
+                dt = t_arr[i1] - t_arr[i0]
+                interp = out[i0] if dt <= 0 else out[i0] + (out[i1] - out[i0]) * (t_arr[i0:i1+1] - t_arr[i0]) / dt
+                diff = np.abs(out[i0:i1+1] - interp)
+                mid = i0 + int(np.argmax(diff))
+                if diff[mid - i0] > err:
+                    return rdp_linear(i0, mid, err)[:-1] + rdp_linear(mid, i1, err)
+                return [i0, i1]
+
+            idxs = rdp_linear(0, n_clip - 1, err=4.0)
+            raw_pts = [(float(t_arr[idx]), float(out[idx])) for idx in idxs]
+
+            # 50px 미만의 미세 흔들림은 이전 정지 좌표로 스냅 (불필요한 미세 이동 방지)
+            cleaned = [raw_pts[0]]
+            for pt in raw_pts[1:]:
+                if abs(pt[1] - cleaned[-1][1]) < 50.0:
+                    cleaned.append((pt[0], cleaned[-1][1]))
+                else:
+                    cleaned.append(pt)
+
+            # 연속 정지 구간 병합
+            merged = [cleaned[0]]
+            for pt in cleaned[1:]:
+                if abs(pt[1] - merged[-1][1]) < 1.0:
+                    merged[-1] = (pt[0], merged[-1][1])
+                else:
+                    merged.append(pt)
+
+            cut_infos.append(("walk", c0, c1, merged))
+            last_static_x = float(merged[-1][1])
+
+    expr, points = build_cut_aware_expr(cut_infos, crop_w)
+
+    # JSON 호환을 위해 프레임별 x 좌표 생성
+    x_frame = np.full(total_frames, -1, dtype=int)
+    for c_type, t0, t1, data in cut_infos:
+        f0 = int(round(t0 * FPS))
+        f1 = min(int(round(t1 * FPS)), total_frames)
+        if f0 >= f1:
+            continue
+        if c_type == "static":
+            x_frame[f0:f1] = int(round(data))
+        elif c_type == "walk":
+            t_arr = np.arange(f0, f1) / float(FPS)
+            pts = data
+            vals = np.full(f1 - f0, pts[0][1], dtype=np.float64)
+            for j in range(1, len(pts)):
+                pt_t0, pt_x0 = pts[j - 1]
+                pt_t1, pt_x1 = pts[j]
+                dt = pt_t1 - pt_t0
+                dx = pt_x1 - pt_x0
+                if abs(dx) >= 1.0 and dt > 0:
+                    u = np.clip((t_arr - pt_t0) / dt, 0.0, 1.0)
+                    vals += dx * u
+            x_frame[f0:f1] = np.clip(np.round(vals), 0, 3840 - crop_w).astype(int)
+
+    # 미할당 프레임(경계 라운딩 등) 전방 채우기
+    default_x = int(round(cut_infos[0][3] if cut_infos[0][0] == "static" else cut_infos[0][3][0][1])) if cut_infos else 1920 - crop_w // 2
+    for f in range(total_frames):
+        if x_frame[f] < 0:
+            x_frame[f] = x_frame[f - 1] if f > 0 else default_x
+
+    log(f"[track_crop] 컷 인지형 프레이밍 완료: 총 {len(cut_infos)}개 샷, 키프레임 {len(points)}개")
+    save_outputs(args, total_frames, x_frame, expr, points, crop_w, det_rate)
 
 
-def save_outputs(args, total_frames, x_frame, crop_w, det_rate):
-    expr, points = build_expr(x_frame)
-
+def save_outputs(args, total_frames, x_frame, expr, points, crop_w, det_rate):
     with open(args.out_json, "w", encoding="utf-8") as f:
         json.dump({
             "fps": FPS,
@@ -314,7 +489,7 @@ def save_outputs(args, total_frames, x_frame, crop_w, det_rate):
     move_total = float(np.sum(np.abs(np.diff(x_frame)))) if len(x_frame) > 1 else 0.0
     log(f"[완료] 검출률={det_rate:.1f}% x_min={int(x_frame.min())} "
         f"x_max={int(x_frame.max())} 이동총량={move_total:.0f}px "
-        f"변화점={len(points)}개")
+        f"키프레임={len(points)}개")
 
 
 if __name__ == "__main__":

@@ -93,7 +93,8 @@ def build_dialogue_text(en, ko, hl):
     ko = ko or ""
     en = en or ""
     if hl:
-        ko_tag = r"{\fs68\c&H00E5FF&\fscx112\fscy112}"
+        # 하이라이트 자막: 골드 컬러(&H00E5FF&) + 팝인 바운스 애니메이션 (118% -> 100%)
+        ko_tag = r"{\t(0,80,\fscx118\fscy118)\t(80,160,\fscx100\fscy100)\fs68\c&H00E5FF&}"
     else:
         ko_tag = r"{\fs68\c&HFFFFFF&}"
     if en.strip():
