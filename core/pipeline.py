@@ -85,11 +85,20 @@ def extract_wav(video_path: str, wav_path: str):
 _PROGRESS_RE = re.compile(r"progress\s*=\s*(\d+)\s*%")
 
 
-def transcribe_words(video_path: str, workdir: str, prefix: str, progress_cb=None):
+class TranscribeCancelled(Exception):
+    """사용자가 전사를 취소했을 때 발생시키는 예외."""
+
+
+def transcribe_words(video_path: str, workdir: str, prefix: str, progress_cb=None,
+                      on_process=None, cancel_event=None):
     """Whisper를 실행하여 단어/글자 단위 타임스탬프 전사 (surrogateescape 디코딩).
 
     progress_cb(percent: int, phase: str) 가 주어지면 whisper-cli의 -pp
     진행률 출력(stderr)을 파싱해 실시간으로 호출한다.
+    on_process(proc) 가 주어지면 whisper-cli Popen 객체를 즉시 전달해
+    호출자가 외부에서 취소(terminate)할 수 있게 한다.
+    cancel_event(threading.Event) 가 set 된 상태로 프로세스가 종료되면
+    TranscribeCancelled 를 발생시킨다.
     """
     whisper_bin = find_binary("whisper-cli") or find_binary("whisper") or find_binary("whisper-cpp")
     whisper_model = get_whisper_model_path()
@@ -109,17 +118,24 @@ def transcribe_words(video_path: str, workdir: str, prefix: str, progress_cb=Non
         "-of", out_prefix
     ]
 
+    if cancel_event is not None and cancel_event.is_set():
+        raise TranscribeCancelled("전사가 사용자에 의해 취소되었습니다.")
+
     if progress_cb:
         progress_cb(0, "Whisper 전사 중...")
         proc = subprocess.Popen(
             cmd, env=_child_env(), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
         )
+        if on_process:
+            on_process(proc)
         for line in proc.stderr:
             m = _PROGRESS_RE.search(line)
             if m:
                 progress_cb(int(m.group(1)), "Whisper 전사 중...")
         proc.wait()
+        if cancel_event is not None and cancel_event.is_set():
+            raise TranscribeCancelled("전사가 사용자에 의해 취소되었습니다.")
         if proc.returncode != 0:
             raise subprocess.CalledProcessError(proc.returncode, cmd)
     else:
@@ -169,10 +185,12 @@ def transcribe_words(video_path: str, workdir: str, prefix: str, progress_cb=Non
         json.dump(words, f, ensure_ascii=False, indent=2)
     return words_path, words
 
-def transcribe_video_full(video_path: str, workdir: str, force: bool = False, progress_cb=None) -> dict:
+def transcribe_video_full(video_path: str, workdir: str, force: bool = False, progress_cb=None,
+                           on_process=None, cancel_event=None) -> dict:
     """전체 원본 영상 1차 전사 (캐시 확인).
 
     progress_cb(percent: int, phase: str) 가 주어지면 진행 상황을 실시간 보고한다.
+    on_process/cancel_event 는 transcribe_words 로 그대로 전달되어 취소를 지원한다.
     """
     os.makedirs(workdir, exist_ok=True)
     base = os.path.splitext(os.path.basename(video_path))[0]
@@ -182,7 +200,10 @@ def transcribe_video_full(video_path: str, workdir: str, force: bool = False, pr
 
     cached = os.path.exists(json_path) and not force
     if not cached:
-        words_path, words = transcribe_words(video_path, workdir, f"{base}_full", progress_cb=progress_cb)
+        words_path, words = transcribe_words(
+            video_path, workdir, f"{base}_full", progress_cb=progress_cb,
+            on_process=on_process, cancel_event=cancel_event,
+        )
         if progress_cb:
             progress_cb(100, "완료")
     else:

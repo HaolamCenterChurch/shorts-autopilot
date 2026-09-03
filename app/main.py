@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import traceback
 
 import webview
@@ -16,12 +17,14 @@ from app.paths import UI_HTML, DEFAULT_OUTPUT_ROOT
 from app.doctor import diagnose, auto_fix
 from app.ai_adapter import list_backends, set_ai_cmd
 from app.orchestrator import generate_plans, revise_plans, generate_subtitles, revise_any, produce_short_pipeline
-from core.pipeline import transcribe_video_full
+from core.pipeline import transcribe_video_full, TranscribeCancelled
 
 
 class Api:
     def __init__(self):
         self._window = None
+        self._transcribe_proc = None
+        self._transcribe_cancel = threading.Event()
         self._state = {
             "media": None,
             "workdir": None,
@@ -64,6 +67,8 @@ class Api:
 
     def transcribe(self, path, force=False):
         """원본 영상 전사 수행."""
+        self._transcribe_cancel.clear()
+        self._transcribe_proc = None
         try:
             base = os.path.splitext(os.path.basename(path))[0]
             workdir = os.path.join(self._state["outdir"], base, "_work")
@@ -74,7 +79,13 @@ class Api:
                     payload = json.dumps({"percent": percent, "phase": phase})
                     self._window.evaluate_js(f"window.onTranscribeProgress({payload})")
 
-            r = transcribe_video_full(path, workdir, force=bool(force), progress_cb=on_progress)
+            def on_process(proc):
+                self._transcribe_proc = proc
+
+            r = transcribe_video_full(
+                path, workdir, force=bool(force), progress_cb=on_progress,
+                on_process=on_process, cancel_event=self._transcribe_cancel,
+            )
             self._state["media"] = path
             self._state["workdir"] = workdir
             self._state["transcript_text"] = r["text"]
@@ -86,8 +97,21 @@ class Api:
                 "workdir": workdir,
                 "path": path
             }
+        except TranscribeCancelled as e:
+            return {"ok": False, "cancelled": True, "error": str(e)}
         except Exception as e:
             return {"ok": False, "error": str(e), "trace": traceback.format_exc()}
+        finally:
+            self._transcribe_proc = None
+
+    def cancel_transcribe(self):
+        """진행 중인 전사를 취소한다."""
+        self._transcribe_cancel.set()
+        proc = self._transcribe_proc
+        if proc and proc.poll() is None:
+            proc.terminate()
+            return {"ok": True}
+        return {"ok": False, "error": "진행 중인 전사가 없습니다."}
 
     def generate_plans(self):
         """OREO 기반 쇼츠 3안 기획 생성."""

@@ -116,6 +116,9 @@
           <div style="background: var(--bg-card); border-radius: 6px; height: 10px; overflow: hidden;">
             <div id="transcribe-bar" style="background: var(--accent); height: 100%; width: 0%; transition: width 0.2s;"></div>
           </div>
+          <div style="margin-top: 10px; text-align: right;">
+            <button class="btn btn-secondary btn-small" id="btn-cancel-transcribe" onclick="cancelTranscribe()">전사 취소</button>
+          </div>
         </div>
       </div>
 
@@ -255,6 +258,8 @@
       }
     }
 
+    let transcribeCancelRequested = false;
+
     async function startTranscribe(force = false) {
       if (!currentVideoPath) return notify('영상을 먼저 선택해 주세요.', 'error');
       notify('전사 시작 중...', 'info');
@@ -263,6 +268,10 @@
       const bar = document.getElementById('transcribe-bar');
       const percentEl = document.getElementById('transcribe-percent');
       const phaseEl = document.getElementById('transcribe-phase');
+      const cancelBtn = document.getElementById('btn-cancel-transcribe');
+      transcribeCancelRequested = false;
+      cancelBtn.disabled = false;
+      cancelBtn.textContent = '전사 취소';
       progressBox.style.display = 'block';
       bar.style.width = '0%';
       percentEl.textContent = '0%';
@@ -277,9 +286,29 @@
         document.getElementById('transcript-viewer').value = res.text;
         notify('전사 완료 (' + (res.cached ? '캐시 재사용' : '새 전사') + ')', 'success');
         setTimeout(() => { progressBox.style.display = 'none'; }, 1200);
+      } else if (res.cancelled) {
+        phaseEl.textContent = '취소됨';
+        notify('전사를 취소했습니다.', 'info');
+        setTimeout(() => { progressBox.style.display = 'none'; }, 1200);
       } else {
         phaseEl.textContent = '실패';
         notify('전사 실패: ' + res.error, 'error');
+      }
+    }
+
+    async function cancelTranscribe() {
+      if (transcribeCancelRequested) return;
+      transcribeCancelRequested = true;
+      const cancelBtn = document.getElementById('btn-cancel-transcribe');
+      cancelBtn.disabled = true;
+      cancelBtn.textContent = '취소 중...';
+      document.getElementById('transcribe-phase').textContent = '취소 중...';
+      const res = await pywebview.api.cancel_transcribe();
+      if (!res.ok) {
+        notify('취소 실패: ' + res.error, 'error');
+        cancelBtn.disabled = false;
+        cancelBtn.textContent = '전사 취소';
+        transcribeCancelRequested = false;
       }
     }
 
@@ -290,7 +319,7 @@
       if (!bar) return;
       bar.style.width = data.percent + '%';
       percentEl.textContent = data.percent + '%';
-      if (data.phase) phaseEl.textContent = data.phase;
+      if (data.phase && !transcribeCancelRequested) phaseEl.textContent = data.phase;
     };
 
     async function generatePlans() {
