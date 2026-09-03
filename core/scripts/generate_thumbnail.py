@@ -67,31 +67,31 @@ def make_youtube_thumbnail(bg_image_path, badge_text, title_line1, title_line2, 
     font_l2 = ImageFont.truetype(FONT_B, 96)
     font_sub = ImageFont.truetype(FONT_SANS, 38)
 
-    # 상단 태그 뱃지
+    # 상단 태그 뱃지 (A안: Y=270 - 3:4 릴스탭 및 4:5 피드 완전 안전 수납)
     if badge_text:
         b_bbox = draw.textbbox((0, 0), badge_text, font=font_badge)
         bw, bh = b_bbox[2] - b_bbox[0], b_bbox[3] - b_bbox[1]
-        bx0, by0 = (1080 - bw) // 2 - 26, 125
+        bx0, by0 = (1080 - bw) // 2 - 26, 270
         draw.rounded_rectangle([bx0, by0, bx0 + bw + 52, by0 + bh + 22], radius=16, fill=(15, 15, 20, 220), outline=(255, 232, 67, 240), width=2)
         draw.text((bx0 + 26, by0 + 9), badge_text, font=font_badge, fill=(255, 232, 67, 255))
 
-    # 메인 타이틀 1행
+    # 메인 타이틀 1행 (A안: Y=365 - 우측 상단 릴스 아이콘 아래로 회피)
     l1_box = draw.textbbox((0, 0), title_line1, font=font_l1)
     l1_w = l1_box[2] - l1_box[0]
-    draw_text_with_shadow(draw, ((1080 - l1_w) // 2, 230), title_line1, font_l1, fill_color=(255, 255, 255, 255), shadow_offset=6)
+    draw_text_with_shadow(draw, ((1080 - l1_w) // 2, 365), title_line1, font_l1, fill_color=(255, 255, 255, 255), shadow_offset=6)
 
-    # 메인 타이틀 2행 (골드 옐로우 하이라이트)
+    # 메인 타이틀 2행 (A안: Y=475 - 골드 옐로우 하이라이트)
     l2_box = draw.textbbox((0, 0), title_line2, font=font_l2)
     l2_w = l2_box[2] - l2_box[0]
-    draw_text_with_shadow(draw, ((1080 - l2_w) // 2, 340), title_line2, font_l2, fill_color=(255, 232, 67, 255), shadow_offset=6)
+    draw_text_with_shadow(draw, ((1080 - l2_w) // 2, 475), title_line2, font_l2, fill_color=(255, 232, 67, 255), shadow_offset=6)
 
-    # 서브 티저 박스
+    # 서브 티저 박스 (A안: Y=605 - 인물 손 제스처 Y=820과 160px 이상 안전 간격)
     if teaser_text:
         s_bbox = draw.textbbox((0, 0), teaser_text, font=font_sub)
         sw, sh = s_bbox[2] - s_bbox[0], s_bbox[3] - s_bbox[1]
-        sx0, sy0 = (1080 - sw) // 2 - 24, 470
+        sx0, sy0 = (1080 - sw) // 2 - 24, 605
         draw.rounded_rectangle([sx0, sy0, sx0 + sw + 48, sy0 + sh + 18], radius=12, fill=(0, 0, 0, 180))
-        draw.text(((1080 - sw) // 2, 477), teaser_text, font=font_sub, fill=(235, 240, 250, 255))
+        draw.text(((1080 - sw) // 2, 612), teaser_text, font=font_sub, fill=(235, 240, 250, 255))
 
     im.convert("RGB").save(out_path, "JPEG", quality=96)
     print(f"[generate_thumbnail] 유튜브 썸네일 저장: {out_path}")
@@ -155,8 +155,49 @@ def make_instagram_thumbnail(bg_image_path, badge_text, title_line1, title_line2
         canvas_guide.save(out_guide_path, "JPEG", quality=96)
         print(f"[generate_thumbnail] 인스타 가이드 커버 저장: {out_guide_path}")
 
+def attach_thumbnail_to_video(thumb_path, video_path, out_path=None):
+    """영상 첫머리에 무음 썸네일(0.7s) -> 블랙 페이드아웃(0.25s) -> 본 영상 페이드인(0.25s) 결합.
+    
+    1. 0.00s ~ 0.70s: 100% 정지 썸네일 (완전 디지털 무음) -> 자동 업로더 0초 첫 프레임 썸네일 인식
+    2. 0.70s ~ 0.95s: 썸네일 블랙으로 페이드 아웃 (0.25초)
+    3. 0.95s: 암전(Dip to black)
+    4. 0.95s ~ 1.20s: 본 영상 블랙에서 페이드 인 (0.25초) + 오디오 50ms 마이크로 페이드인 시작
+    """
+    import subprocess
+    import shutil
+    if out_path is None:
+        raw_backup = video_path.replace(".mp4", "_raw.mp4")
+        if not os.path.exists(raw_backup):
+            shutil.copyfile(video_path, raw_backup)
+        target_out = video_path + ".tmp.mp4"
+        final_dest = video_path
+    else:
+        target_out = out_path
+        final_dest = out_path
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1", "-t", "0.95", "-i", thumb_path,
+        "-f", "lavfi", "-t", "0.95", "-i", "anullsrc=r=48000:cl=mono",
+        "-i", video_path,
+        "-filter_complex",
+        "[0:v]fps=30,settb=1/30,format=yuv420p,fade=t=out:st=0.7:d=0.25[v0];"
+        "[2:v]fps=30,settb=1/30,format=yuv420p,fade=t=in:st=0.0:d=0.25[v1];"
+        "[2:a]afade=t=in:st=0.0:d=0.05[a1];"
+        "[v0][1:a][v1][a1]concat=n=2:v=1:a=1[vout][aout]",
+        "-map", "[vout]", "-map", "[aout]",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart",
+        target_out
+    ]
+    subprocess.run(cmd, check=True)
+    if out_path is None:
+        os.replace(target_out, final_dest)
+    print(f"[generate_thumbnail] 썸네일 인트로 영상 결합 완료: {final_dest}")
+
 def main():
-    parser = argparse.ArgumentParser(description="유튜브 & 인스타그램 썸네일 통합 생성기")
+    parser = argparse.ArgumentParser(description="유튜브 & 인스타그램 썸네일 통합 생성기 (A안 안전영역 기본)")
     parser.add_argument("--mode", choices=["youtube", "instagram", "both"], default="both")
     parser.add_argument("--frame", required=True, help="썸네일 배경 프레임 이미지 경로")
     parser.add_argument("--badge", default="하올람 말씀 인사이트", help="상단 카테고리 뱃지 문구")
@@ -166,12 +207,15 @@ def main():
     parser.add_argument("--out-yt", default="thumb_youtube.jpg", help="유튜브 썸네일 출력 경로")
     parser.add_argument("--out-insta", default="thumb_instagram.jpg", help="인스타 클린 커버 출력 경로")
     parser.add_argument("--out-guide", default="thumb_instagram_guide.jpg", help="인스타 가이드 커버 출력 경로")
+    parser.add_argument("--video", default=None, help="썸네일 인트로를 첫머리에 결합할 완성본 영상 경로 (옵션)")
     args = parser.parse_args()
 
     if args.mode in ["youtube", "both"]:
         make_youtube_thumbnail(args.frame, args.badge, args.l1, args.l2, args.sub, args.out_yt)
     if args.mode in ["instagram", "both"]:
         make_instagram_thumbnail(args.frame, args.badge, args.l1, args.l2, args.sub, args.out_insta, args.out_guide)
+    if args.video and os.path.exists(args.video):
+        attach_thumbnail_to_video(args.out_yt, args.video)
 
 if __name__ == "__main__":
     main()

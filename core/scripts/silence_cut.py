@@ -70,8 +70,10 @@ def find_silence_runs(db, times, threshold, min_silence):
     return runs
 
 
-def build_delete_regions(runs, duration, pad, keep_gap, words, word_guard=False):
+def build_delete_regions(runs, duration, pad, keep_gap, words, word_guard=False,
+                         min_gain=0.40):
     deletes = []
+    skipped_gain = 0
     for idx, (s, e) in enumerate(runs):
         is_leading = (idx == 0 and s <= 0.05)
         is_trailing = (idx == len(runs) - 1 and e >= duration - 0.05)
@@ -91,7 +93,18 @@ def build_delete_regions(runs, duration, pad, keep_gap, words, word_guard=False)
             a, b = s + pad, e - pad
             if b - a <= keep_gap:
                 continue
-            deletes.append((a, b - keep_gap))
+            b -= keep_gap
+            # ★이득이 없는 컷은 만들지 않는다 (2026-09-03 실측).
+            #   pad·keep_gap 를 빼고 나면 0.02초만 지워지는 삭제 구간이 생기는데,
+            #   그래도 화면은 한 번 튄다. 오너가 "음성도 없는데 잠깐 지나가는 컷"
+            #   이라고 지적한 것이 전부 이것이었다. 실측(2026-09-02 3편):
+            #   0.25초 미만만 지우는 컷이 14개 중 8개.
+            if b - a < min_gain:
+                skipped_gain += 1
+                continue
+            deletes.append((a, b))
+    if skipped_gain:
+        log(f"[silence_cut] 이득 {min_gain:.2f}s 미만이라 컷하지 않음: {skipped_gain}개")
 
     # ★단어 가드는 기본으로 쓰지 않는다.
     #   whisper 토큰 타임스탬프는 앞 토큰의 끝 = 뒤 토큰의 시작으로 타임라인을 빈틈없이
@@ -111,6 +124,38 @@ def build_delete_regions(runs, duration, pad, keep_gap, words, word_guard=False)
 
     return deletes
 
+
+def enforce_min_keep(deletes, duration, min_keep):
+    """컷과 컷 사이에 min_keep 보다 짧은 조각이 남지 않게 한다.
+
+    ★짧은 조각은 "갑자기 컷이 바뀌고 잠깐 지나가는 컷"으로 보인다(오너 지적).
+    조각이 너무 짧으면 그 조각을 만든 두 삭제 구간 중 **덜 지우는 쪽을 취소**해
+    앞뒤를 도로 이어 붙인다. 이득이 큰 컷은 살아남는다.
+    """
+    deletes = sorted(deletes)
+    dropped = 0
+    while len(deletes) > 1:
+        target = None
+        for i in range(len(deletes) - 1):
+            if deletes[i + 1][0] - deletes[i][1] < min_keep:
+                li = deletes[i][1] - deletes[i][0]
+                lj = deletes[i + 1][1] - deletes[i + 1][0]
+                target = i if li <= lj else i + 1
+                break
+        if target is None:
+            break
+        deletes.pop(target)
+        dropped += 1
+    # 머리·꼬리에 남는 조각도 같은 기준으로 본다(머리/꼬리 무음 삭제 자체는 건드리지 않는다).
+    if deletes and 0.01 < deletes[0][0] < min_keep:
+        deletes.pop(0)
+        dropped += 1
+    if deletes and 0.01 < duration - deletes[-1][1] < min_keep:
+        deletes.pop()
+        dropped += 1
+    if dropped:
+        log(f"[silence_cut] 조각이 {min_keep:.2f}s 미만이라 취소한 컷: {dropped}개")
+    return deletes
 
 def deletes_to_keeps(deletes, duration):
     deletes = sorted(deletes)
@@ -178,8 +223,12 @@ def main():
     ap.add_argument("--min-silence", type=float, default=0.30)
     ap.add_argument("--word-guard", action="store_true",
                     help="단어 타임스탬프로 삭제를 취소한다(기본 꺼짐)")
-    ap.add_argument("--pad", type=float, default=0.14)
-    ap.add_argument("--keep-gap", type=float, default=0.14)
+    ap.add_argument("--pad", type=float, default=0.12)
+    ap.add_argument("--keep-gap", type=float, default=0.06)
+    ap.add_argument("--min-gain", type=float, default=0.40,
+                    help="이만큼도 못 지우는 무음은 컷하지 않는다(화면만 튄다)")
+    ap.add_argument("--min-keep", type=float, default=1.20,
+                    help="컷 사이 조각이 이보다 짧으면 덜 지우는 쪽 컷을 취소한다")
     ap.add_argument("--workdir", required=True)
     args = ap.parse_args()
 
@@ -210,7 +259,8 @@ def main():
     log(f"[silence_cut] 무음 후보 {len(runs)}개")
 
     deletes = build_delete_regions(runs, duration, args.pad, args.keep_gap,
-                                   words, args.word_guard)
+                                   words, args.word_guard, args.min_gain)
+    deletes = enforce_min_keep(deletes, duration, args.min_keep)
     log(f"[silence_cut] 실제 삭제 구간 {len(deletes)}개")
 
     keeps = deletes_to_keeps(deletes, duration)

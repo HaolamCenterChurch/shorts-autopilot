@@ -305,7 +305,8 @@ def run_silence_cut(raw_path: str, master_path: str, words_path: str, workdir: s
     run_module("silence_cut.py", [
         "--in", raw_path, "--out", master_path,
         "--words", words_path,
-        "--min-silence", "0.30", "--pad", "0.14", "--keep-gap", "0.14",
+        "--min-silence", "0.30", "--pad", "0.12", "--keep-gap", "0.06",
+        "--min-gain", "0.40", "--min-keep", "1.20",
         "--workdir", workdir,
     ])
 

@@ -109,7 +109,8 @@ def stage_a(src, plan, workdir, plan_path=None):
     run_module("silence_cut.py", [
         "--in", raw_path, "--out", master_path,
         "--words", raw_words_path,
-        "--min-silence", "0.30", "--pad", "0.14", "--keep-gap", "0.14",
+        "--min-silence", "0.30", "--pad", "0.12", "--keep-gap", "0.06",
+        "--min-gain", "0.40", "--min-keep", "1.20",
         "--workdir", workdir,
     ])
 
