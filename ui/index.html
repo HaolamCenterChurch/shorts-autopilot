@@ -272,6 +272,8 @@
         } else {
           notify('전사 실패: ' + (res ? res.error : '알 수 없는 오류'), 'error');
         }
+      } catch (e) {
+        notify('전사 중 예외 발생: ' + (e && e.message ? e.message : e), 'error');
       } finally {
         if (progressBar) progressBar.style.display = 'none';
         if (cancelBtn) cancelBtn.style.display = 'none';
