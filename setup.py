@@ -22,6 +22,7 @@ DATA_FILES = [
 OPTIONS = {
     "argv_emulation": False,
     "packages": ["webview", "app", "core"],
+    "iconfile": "assets/app_icon.icns",
     "plist": {
         "CFBundleName": "쇼츠 오토파일럿",
         "CFBundleDisplayName": "쇼츠 오토파일럿",
