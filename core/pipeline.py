@@ -241,11 +241,11 @@ def transcribe_video_full(
     base = os.path.splitext(os.path.basename(video_path))[0]
     out_prefix = os.path.join(workdir, f"{base}_full")
     json_path = out_prefix + ".json"
-    wav_path = os.path.join(workdir, f"{base}_16k.wav")
+    words_path = out_prefix + ".words.json"
+    wav_path = out_prefix + ".wav"
 
-    cached = os.path.exists(json_path) and not force
+    cached = os.path.exists(json_path) and os.path.exists(words_path) and not force
     if not cached:
-        extract_wav(video_path, wav_path, progress_cb=progress_cb, cancel_event=cancel_event)
         words_path, words = transcribe_words(
             video_path,
             workdir,
@@ -259,7 +259,7 @@ def transcribe_video_full(
                 progress_cb(100.0)
             except Exception:
                 pass
-        with open(out_prefix + ".words.json", "r", encoding="utf-8", errors="ignore") as f:
+        with open(words_path, "r", encoding="utf-8", errors="ignore") as f:
             words = json.load(f)
 
     # 전사문 조합
