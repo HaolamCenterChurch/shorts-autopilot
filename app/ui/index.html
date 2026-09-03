@@ -107,6 +107,16 @@
           <button class="btn" onclick="startTranscribe(false)">전사 시작 (캐시 우선)</button>
           <button class="btn btn-secondary" onclick="startTranscribe(true)">다시 전사 (강제)</button>
         </div>
+
+        <div id="transcribe-progress" style="display: none; margin-top: 16px;">
+          <div style="display: flex; justify-content: space-between; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 6px;">
+            <span id="transcribe-phase">전사 진행 중...</span>
+            <span id="transcribe-percent">0%</span>
+          </div>
+          <div style="background: var(--bg-card); border-radius: 6px; height: 10px; overflow: hidden;">
+            <div id="transcribe-bar" style="background: var(--accent); height: 100%; width: 0%; transition: width 0.2s;"></div>
+          </div>
+        </div>
       </div>
 
       <div class="card" id="transcript-card" style="display: none;">
@@ -248,15 +258,40 @@
     async function startTranscribe(force = false) {
       if (!currentVideoPath) return notify('영상을 먼저 선택해 주세요.', 'error');
       notify('전사 시작 중...', 'info');
+
+      const progressBox = document.getElementById('transcribe-progress');
+      const bar = document.getElementById('transcribe-bar');
+      const percentEl = document.getElementById('transcribe-percent');
+      const phaseEl = document.getElementById('transcribe-phase');
+      progressBox.style.display = 'block';
+      bar.style.width = '0%';
+      percentEl.textContent = '0%';
+      phaseEl.textContent = '준비 중...';
+
       const res = await pywebview.api.transcribe(currentVideoPath, force);
       if (res.ok) {
+        bar.style.width = '100%';
+        percentEl.textContent = '100%';
+        phaseEl.textContent = res.cached ? '캐시 재사용' : '완료';
         document.getElementById('transcript-card').style.display = 'block';
         document.getElementById('transcript-viewer').value = res.text;
         notify('전사 완료 (' + (res.cached ? '캐시 재사용' : '새 전사') + ')', 'success');
+        setTimeout(() => { progressBox.style.display = 'none'; }, 1200);
       } else {
+        phaseEl.textContent = '실패';
         notify('전사 실패: ' + res.error, 'error');
       }
     }
+
+    window.onTranscribeProgress = function(data) {
+      const bar = document.getElementById('transcribe-bar');
+      const percentEl = document.getElementById('transcribe-percent');
+      const phaseEl = document.getElementById('transcribe-phase');
+      if (!bar) return;
+      bar.style.width = data.percent + '%';
+      percentEl.textContent = data.percent + '%';
+      if (data.phase) phaseEl.textContent = data.phase;
+    };
 
     async function generatePlans() {
       notify('AI OREO 기획안 3안 생성 중...', 'info');

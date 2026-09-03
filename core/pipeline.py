@@ -15,6 +15,7 @@ check_chunks.py(자막-원문 일치 검증)는 AI 자막 생성 직후 orchestr
 import codecs
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -81,24 +82,48 @@ def extract_wav(video_path: str, wav_path: str):
     cmd = [ffmpeg_bin, "-y", "-i", video_path, "-vn", "-ac", "1", "-ar", "16000", wav_path]
     subprocess.run(cmd, check=True, capture_output=True, env=_child_env())
 
-def transcribe_words(video_path: str, workdir: str, prefix: str):
-    """Whisper를 실행하여 단어/글자 단위 타임스탬프 전사 (surrogateescape 디코딩)."""
+_PROGRESS_RE = re.compile(r"progress\s*=\s*(\d+)\s*%")
+
+
+def transcribe_words(video_path: str, workdir: str, prefix: str, progress_cb=None):
+    """Whisper를 실행하여 단어/글자 단위 타임스탬프 전사 (surrogateescape 디코딩).
+
+    progress_cb(percent: int, phase: str) 가 주어지면 whisper-cli의 -pp
+    진행률 출력(stderr)을 파싱해 실시간으로 호출한다.
+    """
     whisper_bin = find_binary("whisper-cli") or find_binary("whisper") or find_binary("whisper-cpp")
     whisper_model = get_whisper_model_path()
-    
+
     if not whisper_bin or not whisper_model:
         raise RuntimeError(f"Whisper 실행기({whisper_bin}) 또는 모델({whisper_model})이 준비되지 않았습니다.")
 
     wav_path = os.path.join(workdir, f"{prefix}.wav")
+    if progress_cb:
+        progress_cb(0, "오디오 추출 중...")
     extract_wav(video_path, wav_path)
     out_prefix = os.path.join(workdir, prefix)
 
     cmd = [
         whisper_bin, "-m", whisper_model, "-l", "ko", "-oj", "-ojf",
-        "--beam-size", "5", "--temperature", "0", "-f", wav_path,
+        "--beam-size", "5", "--temperature", "0", "-pp", "-f", wav_path,
         "-of", out_prefix
     ]
-    subprocess.run(cmd, check=True, env=_child_env())
+
+    if progress_cb:
+        progress_cb(0, "Whisper 전사 중...")
+        proc = subprocess.Popen(
+            cmd, env=_child_env(), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+        )
+        for line in proc.stderr:
+            m = _PROGRESS_RE.search(line)
+            if m:
+                progress_cb(int(m.group(1)), "Whisper 전사 중...")
+        proc.wait()
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, cmd)
+    else:
+        subprocess.run(cmd, check=True, env=_child_env())
 
     json_file = out_prefix + ".json"
     if not os.path.exists(json_file):
@@ -144,19 +169,25 @@ def transcribe_words(video_path: str, workdir: str, prefix: str):
         json.dump(words, f, ensure_ascii=False, indent=2)
     return words_path, words
 
-def transcribe_video_full(video_path: str, workdir: str, force: bool = False) -> dict:
-    """전체 원본 영상 1차 전사 (캐시 확인)."""
+def transcribe_video_full(video_path: str, workdir: str, force: bool = False, progress_cb=None) -> dict:
+    """전체 원본 영상 1차 전사 (캐시 확인).
+
+    progress_cb(percent: int, phase: str) 가 주어지면 진행 상황을 실시간 보고한다.
+    """
     os.makedirs(workdir, exist_ok=True)
     base = os.path.splitext(os.path.basename(video_path))[0]
     out_prefix = os.path.join(workdir, f"{base}_full")
     json_path = out_prefix + ".json"
-    wav_path = os.path.join(workdir, f"{base}_16k.wav")
+    wav_path = out_prefix + ".wav"
 
     cached = os.path.exists(json_path) and not force
     if not cached:
-        extract_wav(video_path, wav_path)
-        words_path, words = transcribe_words(video_path, workdir, f"{base}_full")
+        words_path, words = transcribe_words(video_path, workdir, f"{base}_full", progress_cb=progress_cb)
+        if progress_cb:
+            progress_cb(100, "완료")
     else:
+        if progress_cb:
+            progress_cb(100, "캐시 재사용")
         with open(out_prefix + ".words.json", "r", encoding="utf-8", errors="ignore") as f:
             words = json.load(f)
 

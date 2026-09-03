@@ -68,8 +68,13 @@ class Api:
             base = os.path.splitext(os.path.basename(path))[0]
             workdir = os.path.join(self._state["outdir"], base, "_work")
             os.makedirs(workdir, exist_ok=True)
-            
-            r = transcribe_video_full(path, workdir, force=bool(force))
+
+            def on_progress(percent, phase=""):
+                if self._window:
+                    payload = json.dumps({"percent": percent, "phase": phase})
+                    self._window.evaluate_js(f"window.onTranscribeProgress({payload})")
+
+            r = transcribe_video_full(path, workdir, force=bool(force), progress_cb=on_progress)
             self._state["media"] = path
             self._state["workdir"] = workdir
             self._state["transcript_text"] = r["text"]
