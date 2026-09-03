@@ -118,20 +118,20 @@ def run_ai(prompt: str, context: str, timeout: int = DEFAULT_TIMEOUT) -> str:
     return proc.stdout
 
 def parse_json(text: str) -> dict:
-    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    candidate = m.group(1) if m else None
-    if candidate is None:
-        start = text.find("{")
-        if start != -1:
-            depth = 0
-            for i in range(start, len(text)):
-                if text[i] == "{":
-                    depth += 1
-                elif text[i] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        candidate = text[start:i + 1]
-                        break
+    m = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+    block = m.group(1) if m else text
+    candidate = None
+    start = block.find("{")
+    if start != -1:
+        depth = 0
+        for i in range(start, len(block)):
+            if block[i] == "{":
+                depth += 1
+            elif block[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = block[start:i + 1]
+                    break
     if candidate is None:
         raise ValueError(f"AI 응답에서 JSON을 찾지 못함: {text[:300]}")
     return json.loads(candidate)
