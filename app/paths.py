@@ -2,6 +2,7 @@
 
 하드코딩된 절대경로를 금지하며 shutil.which 및 시스템 표준 경로 탐색을 사용합니다.
 """
+import glob
 import os
 import shutil
 import sys
@@ -32,12 +33,41 @@ _EXTRA_PATHS = [
     "/bin",
 ]
 
+# whisper.cpp 는 brew 대신 소스 빌드로 임의 폴더에 두는 경우가 흔하다(예: ~/Desktop/Whisper/
+# whisper.cpp, ~/whisper.cpp). PATH에 안 걸려도 찾도록 홈 디렉토리 얕은 글롭 탐색으로 보완한다.
+_WHISPER_BIN_GLOBS = [
+    "~/whisper.cpp/build/bin/whisper-cli",
+    "~/*/whisper.cpp/build/bin/whisper-cli",
+    "~/*/*/whisper.cpp/build/bin/whisper-cli",
+]
+_WHISPER_MODEL_GLOBS = [
+    "~/whisper.cpp/models/ggml-large-v3.bin",
+    "~/*/whisper.cpp/models/ggml-large-v3.bin",
+    "~/*/*/whisper.cpp/models/ggml-large-v3.bin",
+]
+
 def augmented_path_str() -> str:
     return os.pathsep.join(_EXTRA_PATHS + [os.environ.get("PATH", "")])
 
+def _glob_first_existing(patterns: list[str], min_size: int = 0) -> str | None:
+    for pattern in patterns:
+        for hit in sorted(glob.glob(os.path.expanduser(pattern))):
+            if os.path.isfile(hit) and os.path.getsize(hit) > min_size:
+                return hit
+    return None
+
 def find_binary(name: str) -> str | None:
-    """PATH 및 추가 경로에서 실행 파일 위치를 탐색."""
-    return shutil.which(name, path=augmented_path_str())
+    """환경변수 오버라이드 → PATH/추가 경로 → 홈 디렉토리 whisper.cpp 글롭 순으로 탐색."""
+    if name in ("whisper-cli", "whisper-cpp", "whisper"):
+        env_bin = os.environ.get("SHORTS_WHISPER_BIN")
+        if env_bin and os.path.isfile(env_bin):
+            return env_bin
+    found = shutil.which(name, path=augmented_path_str())
+    if found:
+        return found
+    if name in ("whisper-cli", "whisper-cpp", "whisper"):
+        return _glob_first_existing(_WHISPER_BIN_GLOBS)
+    return None
 
 def get_yunet_model_path() -> str | None:
     """프로젝트 models/ 또는 시스템 기본 위치에서 YuNet 모델 검색."""
@@ -71,7 +101,10 @@ def get_fonts_dirs() -> list[str]:
     return [c for c in candidates if os.path.isdir(c)]
 
 def get_whisper_model_path() -> str | None:
-    """Whisper ggml 모델 경로 검색."""
+    """Whisper ggml 모델 경로 검색. 환경변수 오버라이드 → 번들/캐시 경로 → 홈 디렉토리 글롭."""
+    env_model = os.environ.get("SHORTS_WHISPER_MODEL")
+    if env_model and os.path.isfile(env_model):
+        return env_model
     candidates = [
         os.path.join(MODELS_DIR, "ggml-large-v3.bin"),
         os.path.join(BASE_DIR, "ggml-large-v3.bin"),
@@ -81,4 +114,4 @@ def get_whisper_model_path() -> str | None:
     for c in candidates:
         if os.path.isfile(c) and os.path.getsize(c) > 1000:
             return c
-    return None
+    return _glob_first_existing(_WHISPER_MODEL_GLOBS, min_size=1000)

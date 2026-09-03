@@ -38,6 +38,8 @@
     .btn-secondary:hover { background: #475569; }
     .btn-success { background: var(--success); }
     .btn-success:hover { background: #059669; }
+    .btn-danger { background: var(--danger); }
+    .btn-danger:hover { background: #dc2626; }
     .btn-small { padding: 4px 10px; font-size: 0.8rem; }
 
     .drop-zone { border: 2px dashed var(--border); border-radius: 8px; padding: 40px 20px; text-align: center; cursor: pointer; transition: 0.2s; }
@@ -103,10 +105,12 @@
           <div id="video-path-label" style="font-weight: 600;">클릭하여 비디오 선택 또는 드래그 앤 드롭</div>
         </div>
 
-        <div style="margin-top: 16px; display: flex; gap: 10px;">
+        <div style="margin-top: 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
           <button class="btn" onclick="startTranscribe(false)">전사 시작 (캐시 우선)</button>
           <button class="btn btn-secondary" onclick="startTranscribe(true)">다시 전사 (강제)</button>
+          <button class="btn btn-danger" id="transcribe-cancel-btn" style="display: none;" onclick="cancelTranscribe()">전사 취소</button>
         </div>
+        <div id="transcribe-progress-bar" style="display: none; margin-top: 12px; padding: 10px 14px; background: var(--bg-card); border-radius: 6px; font-weight: 600;">전사 진행률: 0%</div>
       </div>
 
       <div class="card" id="transcript-card" style="display: none;">
@@ -248,14 +252,34 @@
     async function startTranscribe(force = false) {
       if (!currentVideoPath) return notify('영상을 먼저 선택해 주세요.', 'error');
       notify('전사 시작 중...', 'info');
-      const res = await pywebview.api.transcribe(currentVideoPath, force);
-      if (res.ok) {
-        document.getElementById('transcript-card').style.display = 'block';
-        document.getElementById('transcript-viewer').value = res.text;
-        notify('전사 완료 (' + (res.cached ? '캐시 재사용' : '새 전사') + ')', 'success');
-      } else {
-        notify('전사 실패: ' + res.error, 'error');
+      const progressBar = document.getElementById('transcribe-progress-bar');
+      const cancelBtn = document.getElementById('transcribe-cancel-btn');
+      if (progressBar) {
+        progressBar.textContent = '전사 진행률: 0%';
+        progressBar.style.display = 'block';
       }
+      if (cancelBtn) {
+        cancelBtn.style.display = 'inline-flex';
+      }
+      try {
+        const res = await pywebview.api.transcribe(currentVideoPath, force);
+        if (res && res.cancelled) {
+          notify('전사 취소됨', 'info');
+        } else if (res && res.ok) {
+          document.getElementById('transcript-card').style.display = 'block';
+          document.getElementById('transcript-viewer').value = res.text;
+          notify('전사 완료 (' + (res.cached ? '캐시 재사용' : '새 전사') + ')', 'success');
+        } else {
+          notify('전사 실패: ' + (res ? res.error : '알 수 없는 오류'), 'error');
+        }
+      } finally {
+        if (progressBar) progressBar.style.display = 'none';
+        if (cancelBtn) cancelBtn.style.display = 'none';
+      }
+    }
+
+    async function cancelTranscribe() {
+      await pywebview.api.cancel_transcribe();
     }
 
     async function generatePlans() {
@@ -337,6 +361,13 @@
         notify('렌더링 에러', 'error');
       }
     }
+
+    window.onTranscribeProgress = function(data) {
+      const el = document.getElementById('transcribe-progress-bar');
+      if (el && data && typeof data.pct !== 'undefined') {
+        el.textContent = `전사 진행률: ${Math.round(data.pct)}%`;
+      }
+    };
 
     window.onRenderProgress = function(msg) {
       document.getElementById('render-status').textContent = msg;

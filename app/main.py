@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import traceback
 
 import webview
@@ -22,6 +23,7 @@ from core.pipeline import transcribe_video_full
 class Api:
     def __init__(self):
         self._window = None
+        self._transcribe_cancel_event = threading.Event()
         self._state = {
             "media": None,
             "workdir": None,
@@ -64,12 +66,19 @@ class Api:
 
     def transcribe(self, path, force=False):
         """원본 영상 전사 수행."""
+        self._transcribe_cancel_event.clear()
         try:
             base = os.path.splitext(os.path.basename(path))[0]
             workdir = os.path.join(self._state["outdir"], base, "_work")
             os.makedirs(workdir, exist_ok=True)
             
-            r = transcribe_video_full(path, workdir, force=bool(force))
+            r = transcribe_video_full(
+                path,
+                workdir,
+                force=bool(force),
+                progress_cb=lambda pct: self._window.evaluate_js(f"window.onTranscribeProgress({json.dumps({'pct': pct})})") if self._window else None,
+                cancel_event=self._transcribe_cancel_event,
+            )
             self._state["media"] = path
             self._state["workdir"] = workdir
             self._state["transcript_text"] = r["text"]
@@ -81,8 +90,17 @@ class Api:
                 "workdir": workdir,
                 "path": path
             }
+        except RuntimeError as e:
+            if str(e) == "취소됨":
+                return {"ok": False, "cancelled": True}
+            return {"ok": False, "error": str(e), "trace": traceback.format_exc()}
         except Exception as e:
             return {"ok": False, "error": str(e), "trace": traceback.format_exc()}
+
+    def cancel_transcribe(self):
+        """진행 중인 전사를 취소한다."""
+        self._transcribe_cancel_event.set()
+        return {"ok": True}
 
     def generate_plans(self):
         """OREO 기반 쇼츠 3안 기획 생성."""

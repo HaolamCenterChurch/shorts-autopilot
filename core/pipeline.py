@@ -15,8 +15,10 @@ check_chunks.py(자막-원문 일치 검증)는 AI 자막 생성 직후 orchestr
 import codecs
 import json
 import os
+import re
 import subprocess
 import sys
+import threading
 
 from app.paths import (
     find_binary,
@@ -27,6 +29,7 @@ from app.paths import (
 )
 
 SCRIPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts")
+_PROGRESS_RE = re.compile(r"progress\s*=\s*(\d+(?:\.\d+)?)\s*%")
 
 
 def _child_env() -> dict:
@@ -73,15 +76,47 @@ def run_module(script_name: str, args_list: list[str]):
     log(f"[pipeline] 실행: {script_name} {' '.join(args_list)}")
     subprocess.run(cmd, check=True, env=_child_env())
 
-def extract_wav(video_path: str, wav_path: str):
+def extract_wav(video_path: str, wav_path: str, progress_cb=None, cancel_event: threading.Event | None = None):
     """영상에서 16kHz 모노 WAV 추출."""
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("취소됨")
     ffmpeg_bin = find_binary("ffmpeg")
     if not ffmpeg_bin:
         raise RuntimeError("ffmpeg 바이너리를 찾을 수 없습니다.")
     cmd = [ffmpeg_bin, "-y", "-i", video_path, "-vn", "-ac", "1", "-ar", "16000", wav_path]
-    subprocess.run(cmd, check=True, capture_output=True, env=_child_env())
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_child_env())
+    try:
+        while proc.poll() is None:
+            if cancel_event is not None and cancel_event.is_set():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                raise RuntimeError("취소됨")
+            try:
+                proc.wait(timeout=0.1)
+            except subprocess.TimeoutExpired:
+                pass
+        if proc.returncode != 0:
+            _, stderr_data = proc.communicate()
+            raise subprocess.CalledProcessError(proc.returncode, cmd, stderr=stderr_data)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=1)
+            except Exception:
+                proc.kill()
 
-def transcribe_words(video_path: str, workdir: str, prefix: str):
+def transcribe_words(
+    video_path: str,
+    workdir: str,
+    prefix: str,
+    progress_cb=None,
+    cancel_event: threading.Event | None = None,
+):
     """Whisper를 실행하여 단어/글자 단위 타임스탬프 전사 (surrogateescape 디코딩)."""
     whisper_bin = find_binary("whisper-cli") or find_binary("whisper") or find_binary("whisper-cpp")
     whisper_model = get_whisper_model_path()
@@ -90,15 +125,65 @@ def transcribe_words(video_path: str, workdir: str, prefix: str):
         raise RuntimeError(f"Whisper 실행기({whisper_bin}) 또는 모델({whisper_model})이 준비되지 않았습니다.")
 
     wav_path = os.path.join(workdir, f"{prefix}.wav")
-    extract_wav(video_path, wav_path)
+    extract_wav(video_path, wav_path, progress_cb=progress_cb, cancel_event=cancel_event)
     out_prefix = os.path.join(workdir, prefix)
 
     cmd = [
         whisper_bin, "-m", whisper_model, "-l", "ko", "-oj", "-ojf",
-        "--beam-size", "5", "--temperature", "0", "-f", wav_path,
+        "--beam-size", "5", "--temperature", "0", "-pp", "-f", wav_path,
         "-of", out_prefix
     ]
-    subprocess.run(cmd, check=True, env=_child_env())
+
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("취소됨")
+
+    proc = subprocess.Popen(
+        cmd,
+        env=_child_env(),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+
+    try:
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                raise RuntimeError("취소됨")
+
+            line = proc.stderr.readline()
+            if not line:
+                if proc.poll() is not None:
+                    break
+                continue
+
+            m = _PROGRESS_RE.search(line)
+            if m and progress_cb:
+                try:
+                    progress_cb(float(m.group(1)))
+                except Exception:
+                    pass
+
+        return_code = proc.wait()
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("취소됨")
+        if return_code != 0:
+            raise subprocess.CalledProcessError(return_code, cmd)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=1)
+            except Exception:
+                proc.kill()
 
     json_file = out_prefix + ".json"
     if not os.path.exists(json_file):
@@ -144,7 +229,13 @@ def transcribe_words(video_path: str, workdir: str, prefix: str):
         json.dump(words, f, ensure_ascii=False, indent=2)
     return words_path, words
 
-def transcribe_video_full(video_path: str, workdir: str, force: bool = False) -> dict:
+def transcribe_video_full(
+    video_path: str,
+    workdir: str,
+    force: bool = False,
+    progress_cb=None,
+    cancel_event: threading.Event | None = None,
+) -> dict:
     """전체 원본 영상 1차 전사 (캐시 확인)."""
     os.makedirs(workdir, exist_ok=True)
     base = os.path.splitext(os.path.basename(video_path))[0]
@@ -154,9 +245,20 @@ def transcribe_video_full(video_path: str, workdir: str, force: bool = False) ->
 
     cached = os.path.exists(json_path) and not force
     if not cached:
-        extract_wav(video_path, wav_path)
-        words_path, words = transcribe_words(video_path, workdir, f"{base}_full")
+        extract_wav(video_path, wav_path, progress_cb=progress_cb, cancel_event=cancel_event)
+        words_path, words = transcribe_words(
+            video_path,
+            workdir,
+            f"{base}_full",
+            progress_cb=progress_cb,
+            cancel_event=cancel_event,
+        )
     else:
+        if progress_cb:
+            try:
+                progress_cb(100.0)
+            except Exception:
+                pass
         with open(out_prefix + ".words.json", "r", encoding="utf-8", errors="ignore") as f:
             words = json.load(f)
 
