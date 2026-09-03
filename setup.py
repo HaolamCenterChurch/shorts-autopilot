@@ -13,7 +13,10 @@ APP = ["app/main.py"]
 
 DATA_FILES = [
     ("prompts", glob.glob("prompts/*.md")),
-    ("app/ui", ["app/ui/index.html"]),
+    # ui/ 는 "app" 패키지 밖에 둬야 한다: app/ 안에 두면 py2app 이 site-packages.zip
+    # 안에 동명의 빈 app/__init__.pyc 를 만들어 진짜 app 패키지(app/paths.py 등)를
+    # sys.path 우선순위로 가려버려 ModuleNotFoundError: app.paths 가 난다.
+    ("ui", ["ui/index.html"]),
 ]
 
 OPTIONS = {
