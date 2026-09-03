@@ -262,8 +262,26 @@ def transcribe_video_full(
         with open(words_path, "r", encoding="utf-8", errors="ignore") as f:
             words = json.load(f)
 
-    # 전사문 조합
-    full_text = "".join(w.get("text", "") for w in words)
+    # 전사문 조합: [HH:MM:SS,mmm --> HH:MM:SS,mmm] 대사 형식.
+    # OREO 기획 프롬프트(plan_oreo.md)가 이 타임코드 포맷을 요구하므로 words(글자 스트림)가 아닌
+    # whisper 원본 세그먼트(json_path)에서 만든다. 같은 문장이 연속 3회를 넘게 반복되면
+    # whisper의 무음/반복구간 환각으로 보고 그 이후분은 잘라낸다.
+    with open(json_path, "r", encoding="utf-8", errors="ignore") as f:
+        raw = json.load(f)
+    lines = []
+    prev_text, repeat_run = None, 0
+    for seg in raw.get("transcription", []):
+        text = seg.get("text", "").strip()
+        if not text:
+            continue
+        repeat_run = repeat_run + 1 if text == prev_text else 0
+        prev_text = text
+        if repeat_run >= 3:
+            continue
+        ts = seg.get("timestamps", {})
+        lines.append(f"[{ts.get('from', '')} --> {ts.get('to', '')}] {text}")
+    full_text = "\n".join(lines)
+
     return {
         "json": json_path,
         "wav": wav_path,
