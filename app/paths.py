@@ -11,10 +11,13 @@ if getattr(sys, "frozen", False) or "RESOURCEPATH" in os.environ:
 else:
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# ui/ 는 app 패키지 밖의 최상위 폴더(app/ui 아님). "app" 패키지 안에 두면 py2app 이
+# site-packages.zip 안에 동명의 빈 app 패키지를 만들어 진짜 app 패키지를 가린다.
+UI_HTML = os.path.join(BASE_DIR, "ui", "index.html")
+
 APP_DIR = os.path.join(BASE_DIR, "app")
 CORE_DIR = os.path.join(BASE_DIR, "core")
 PROMPTS_DIR = os.path.join(BASE_DIR, "prompts")
-UI_HTML = os.path.join(APP_DIR, "ui", "index.html")
 MODELS_DIR = os.path.join(BASE_DIR, "models")
 
 # 기본 출력 폴더
