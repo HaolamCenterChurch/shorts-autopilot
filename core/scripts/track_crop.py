@@ -202,6 +202,44 @@ def enforce_corridor(x_desired, face_cx, face_w, crop_w, max_step,
     return out
 
 
+def snap_cuts_to_visual(in_path, cuts, fps=FPS):
+    """비디오 스트림을 직접 확인하여 cuts 시점을 실제 픽셀 차이가 발생하는 프레임으로 정밀 동기화."""
+    if not os.path.exists(in_path) or not cuts:
+        return cuts
+    cap = cv2.VideoCapture(in_path)
+    if not cap.isOpened():
+        return cuts
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    snapped = [0.0]
+    for c in cuts:
+        if c <= 0.1 or c >= (total_frames - 1) / float(fps) - 0.1:
+            continue
+        approx_f = int(round(c * fps))
+        start_f = max(0, approx_f - 4)
+        end_f = min(total_frames - 1, approx_f + 5)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_f)
+        diffs = []
+        prev = None
+        for f in range(start_f, end_f + 1):
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if prev is not None:
+                d = float(np.mean(np.abs(frame.astype(float) - prev.astype(float))))
+                diffs.append((f, d))
+            prev = frame
+        if diffs:
+            best_f, best_d = max(diffs, key=lambda x: x[1])
+            if best_d >= 3.5:
+                snapped.append(best_f / float(fps))
+            else:
+                snapped.append(c)
+        else:
+            snapped.append(c)
+    cap.release()
+    return sorted(list(set(snapped)))
+
+
 def find_shot_boundaries(in_path, cuts_path, plan_path, total_duration):
     """cuts.json 및 plan.json 기반으로 마스터 영상의 모든 컷(샷) 경계를 추출한다."""
     master_cuts = [0.0]
@@ -235,6 +273,9 @@ def find_shot_boundaries(in_path, cuts_path, plan_path, total_duration):
                 master_cuts.append(master_t)
         except Exception as err:
             log(f"[track_crop] cuts.json 읽기 실패: {err}")
+
+    # 비디오 실제 픽셀 변화 프레임으로 컷 경계 정밀 스냅
+    master_cuts = snap_cuts_to_visual(in_path, master_cuts, FPS)
 
     master_cuts.append(total_duration)
     master_cuts = sorted(list(set(master_cuts)))
@@ -274,14 +315,18 @@ def build_cut_aware_expr(cut_infos, crop_w):
         if c_type == "static":
             dx = data - cur_x
             if abs(dx) >= 1.0 and t0 > 0:
-                expr += f"+({dx:.1f})*gte(t\\,{t0:.4f})"
+                cut_frame = int(round(t0 * FPS))
+                safe_t = (cut_frame - 0.5) / float(FPS)
+                expr += f"+({dx:.1f})*gte(t\\,{safe_t:.4f})"
                 cur_x = data
             all_points.append((t0, cur_x))
         elif c_type == "walk":
             start_x = data[0][1]
             dx_cut = start_x - cur_x
             if abs(dx_cut) >= 1.0 and t0 > 0:
-                expr += f"+({dx_cut:.1f})*gte(t\\,{t0:.4f})"
+                cut_frame = int(round(t0 * FPS))
+                safe_t = (cut_frame - 0.5) / float(FPS)
+                expr += f"+({dx_cut:.1f})*gte(t\\,{safe_t:.4f})"
                 cur_x = start_x
             all_points.append((t0, cur_x))
 
