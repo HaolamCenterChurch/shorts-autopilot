@@ -1,6 +1,6 @@
-# 🎬 Shorts Autopilot Desktop App
+# 🎬 하올람 쇼츠 오토파일럿 (Shorts Autopilot Desktop App)
 
-16:9 가로 강연/발표 영상 하나로 편집 프로그램 없이 **9:16 세로 완성본 쇼츠 MP4**를 자동 생성하는 pywebview 기반 데스크톱 애플리케이션입니다.
+하올람센터처치(Haolam Center Church)에서 사용하는 도구로, 16:9 가로 강연/설교 영상 하나로 편집 프로그램 없이 **9:16 세로 완성본 쇼츠 MP4**를 자동 생성하는 pywebview 기반 데스크톱 애플리케이션입니다.
 
 ---
 
