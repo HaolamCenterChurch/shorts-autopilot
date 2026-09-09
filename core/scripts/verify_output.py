@@ -5,17 +5,12 @@ import difflib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-from app.paths import get_whisper_model_path
-
-FFMPEG = os.environ.get("SHORTS_FFMPEG_BIN") or shutil.which("ffmpeg") or "ffmpeg"
-WHISPER_BIN = (os.environ.get("SHORTS_WHISPER_BIN") or shutil.which("whisper-cli")
-               or shutil.which("whisper-cpp") or shutil.which("whisper") or "whisper-cli")
-WHISPER_MODEL = os.environ.get("SHORTS_WHISPER_MODEL") or get_whisper_model_path() or ""
+FFMPEG = "/opt/homebrew/bin/ffmpeg"
+WHISPER_BIN = "/Users/caleb/Desktop/Whisper/whisper.cpp/build/bin/whisper-cli"
+WHISPER_MODEL = "/Users/caleb/Desktop/Whisper/whisper.cpp/models/ggml-large-v3.bin"
 
 
 def log(msg):

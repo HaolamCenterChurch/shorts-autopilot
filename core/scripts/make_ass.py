@@ -24,7 +24,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Main,Apple SD Gothic Neo,68,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,4.0,2.0,2,60,60,470,1
+Style: Main,Apple SD Gothic Neo,{FS},&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,{OUTLINE},{SHADOW},2,{MLR},{MLR},{MV},1{TOPSTYLE}{BADGESTYLE}
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -70,6 +70,12 @@ def match_chunks_to_words(words, chunks):
         #   교정한 문장이라 길이가 달라질 수 있고, 그러면 정렬이 밀린다.
         target_len = len(normalize(chunk.get("stt") or chunk.get("ko", "")))
         first_idx = w_idx
+        # ★선행 구두점 토큰(정규화하면 빈 문자열)을 블록 시작 시각으로 쓰지 않는다.
+        #   whisper 는 회중 웃음처럼 발화가 없는 구간을 "." 토큰 하나로 길게 잡는다.
+        #   그걸 시작으로 삼으면 자막이 실제 발화보다 먼저 떠서 펀치라인을 미리 까버린다
+        #   (2026-09-06 실측: D안 "서로 고아라서 그래요" 가 발화 1.78초 전에 떴다).
+        while first_idx < n_words and not norm_words[first_idx]:
+            first_idx += 1
         consumed = 0
         last_idx = w_idx
         if target_len == 0:
@@ -89,14 +95,15 @@ def match_chunks_to_words(words, chunks):
     return results
 
 
-def build_dialogue_text(en, ko, hl):
+def build_dialogue_text(en, ko, hl, no_en=False, fs=68):
     ko = ko or ""
-    en = en or ""
+    en = "" if no_en else (en or "")
     if hl:
         # 하이라이트 자막: 골드 컬러(&H00E5FF&) + 팝인 바운스 애니메이션 (118% -> 100%)
-        ko_tag = r"{\t(0,80,\fscx118\fscy118)\t(80,160,\fscx100\fscy100)\fs68\c&H00E5FF&}"
+        ko_tag = (r"{\t(0,80,\fscx118\fscy118)\t(80,160,\fscx100\fscy100)\fs"
+                  + str(fs) + r"\c&H00E5FF&}")
     else:
-        ko_tag = r"{\fs68\c&HFFFFFF&}"
+        ko_tag = r"{\fs" + str(fs) + r"\c&HFFFFFF&}"
     if en.strip():
         en_part = r"{\fs42\c&HF0F4F8&}" + en + r"\N"
     else:
@@ -110,6 +117,33 @@ def main():
     ap.add_argument("--chunks", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--duration", type=float, required=True)
+    ap.add_argument("--last-tail", type=float, default=None,
+                    help="마지막 블록을 (마지막 단어 끝 + 이 초)에서 끊는다. "
+                         "미지정이면 종전대로 영상 끝까지 늘린다.")
+    ap.add_argument("--no-en", action="store_true",
+                    help="영문 자막을 렌더하지 않는다 (한글 1단)")
+    ap.add_argument("--font-size", type=int, default=68,
+                    help="한글 자막 폰트 크기 (기본 68)")
+    ap.add_argument("--margin-v", type=int, default=470,
+                    help="자막 하단 여백 px (기본 470)")
+    ap.add_argument("--badge", default=None,
+                    help="상단 밴드에 얹을 작은 뱃지 문구 (옵션)")
+    ap.add_argument("--badge-margin", type=int, default=205,
+                    help="뱃지의 화면 위쪽 여백 px (기본 205)")
+    ap.add_argument("--margin-lr", type=int, default=60,
+                    help="자막 좌우 여백 px (기본 60)")
+    ap.add_argument("--outline", type=float, default=4.0,
+                    help="자막 테두리(스트로크) 두께. 0 이면 테두리 없음 (기본 4.0)")
+    ap.add_argument("--top-title-outline", type=float, default=6.0,
+                    help="상단 제목 테두리 두께. 0 이면 테두리 없음 (기본 6.0)")
+    ap.add_argument("--shadow", type=float, default=2.0,
+                    help="자막 그림자 크기. 0 이면 그림자 없음 (기본 2.0)")
+    ap.add_argument("--top-title", default=None,
+                    help="화면 상단(인물 머리 위)에 영상 내내 고정 표시할 제목. \\N 으로 줄바꿈")
+    ap.add_argument("--top-title-size", type=int, default=84,
+                    help="상단 제목 폰트 크기 (기본 84)")
+    ap.add_argument("--top-title-margin", type=int, default=110,
+                    help="상단 제목의 화면 위쪽 여백 px (기본 110)")
     args = ap.parse_args()
 
     with open(args.words, "r", encoding="utf-8", errors="ignore") as f:
@@ -136,13 +170,52 @@ def main():
     for i in range(len(spans) - 1):
         ends[i] = starts[i + 1]
     ends[-1] = args.duration
+    if args.last_tail is not None:
+        # 마지막 자막이 영상 끝까지 늘어나면 뒤에 페이드아웃 자리가 안 남는다.
+        last_word_end = 0.0
+        for _w in reversed(words):          # 구두점 토큰은 건너뛴다
+            # 영상 길이를 넘는 t1 은 DTW 가 꼬리 무음까지 물고 늘어진 것이라 믿지 않는다.
+            if normalize(_w.get("text", "")) and _w["t1"] <= args.duration + 1e-6:
+                last_word_end = _w["t1"]
+                break
+        ends[-1] = min(args.duration, max(starts[-1] + 0.40, last_word_end + args.last_tail))
 
-    lines = [ASS_HEADER]
+    top_style = ""
+    if args.top_title:
+        top_style = (
+            "\nStyle: TopTitle,Apple SD Gothic Neo,%d,&H00FFFFFF,&H000000FF,"
+            "&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,%.1f,0.0,8,50,50,%d,1"
+            % (args.top_title_size, args.top_title_outline, args.top_title_margin))
+
+    badge_style = ""
+    if args.badge:
+        badge_style = (
+            "\nStyle: Badge,Apple SD Gothic Neo,36,&H0043E8FF,&H000000FF,"
+            "&H00141414,&H00141414,-1,0,0,0,100,100,0,0,3,8.0,0.0,8,50,50,%d,1"
+            % args.badge_margin)
+
+    header = ASS_HEADER.replace("{BADGESTYLE}", badge_style) \
+                       .replace("{MV}", str(args.margin_v)) \
+                       .replace("{FS}", str(args.font_size)) \
+                       .replace("{MLR}", str(args.margin_lr)) \
+                       .replace("{SHADOW}", f"{args.shadow:.1f}") \
+                       .replace("{OUTLINE}", f"{args.outline:.1f}") \
+                       .replace("{TOPSTYLE}", top_style)
+    lines = [header]
+    if args.badge:
+        lines.append(
+            f"Dialogue: 0,{fmt_time(0.0)},{fmt_time(args.duration)},Badge,,0,0,0,,"
+            f"{args.badge}\n")
+    if args.top_title:
+        lines.append(
+            f"Dialogue: 0,{fmt_time(0.0)},{fmt_time(args.duration)},TopTitle,,0,0,0,,"
+            f"{args.top_title}\n")
     for chunk, s, e in zip(chunks, starts, ends):
         if e <= s:
             e = s + 0.01
         text = build_dialogue_text(chunk.get("en"), chunk.get("ko", ""),
-                                    chunk.get("hl", False))
+                                    chunk.get("hl", False), no_en=args.no_en,
+                                    fs=args.font_size)
         lines.append(
             f"Dialogue: 0,{fmt_time(s)},{fmt_time(e)},Main,,0,0,0,,{text}\n")
 

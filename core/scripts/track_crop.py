@@ -354,6 +354,14 @@ def main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--cuts", default=None, help="cuts.json 경로")
     ap.add_argument("--plan", default=None, help="plan.json 경로")
+    ap.add_argument("--static-spread", type=float, default=150.0,
+                    help="이 이동폭(px) 이하의 샷을 제자리 발화로 보고 카메라를 고정한다 (기본 150)")
+    ap.add_argument("--static-mindur", type=float, default=1.8,
+                    help="이 길이(초) 미만의 샷은 무조건 고정한다 (기본 1.8)")
+    ap.add_argument("--pan-speed", type=float, default=480.0,
+                    help="이동 샷의 등속 패닝 속도 px/s (기본 480)")
+    ap.add_argument("--static-lock", type=float, default=60.0,
+                    help="직전 정적 샷과 이 거리(px) 미만이면 같은 좌표로 락한다 (기본 60)")
     args = ap.parse_args()
 
     crop_w = args.crop_w
@@ -390,18 +398,38 @@ def main():
         fill_w = np.nanmedian(w_interp) if not np.all(np.isnan(w_interp)) else crop_w * 0.3
         w_interp = np.where(np.isnan(w_interp), fill_w, w_interp)
 
-    med_window = max(1, round(1.5 * args.sample_fps))
-    cx_med = moving_median(cx_interp, med_window)
-    w_med = moving_median(w_interp, med_window)
-
-    sample_times = np.array(idxs, dtype=np.float64)
-    frame_times = np.arange(total_frames, dtype=np.float64)
-    face_cx_full = np.interp(frame_times, sample_times, cx_med)
-    face_w_full = np.interp(frame_times, sample_times, w_med)
-
-    # 컷 경계 탐색
+    # 컷 경계를 먼저 구한다 — 스무딩이 경계를 넘어가면 안 되기 때문이다.
     shots = find_shot_boundaries(args.in_path, cuts_path, plan_path, total_dur)
     log(f"[track_crop] 총 {len(shots)}개 컷(샷) 분할 프레이밍 시작")
+
+    # ★스무딩·보간을 반드시 '샷 안에서만' 한다 (2026-09-06 오너 지적).
+    #   전역으로 돌리면 med_window(=1.5*sample_fps, ±0.7초)가 컷 경계를 넘나들며 섞여서
+    #   새 샷의 첫 프레임 얼굴 위치가 이전 샷 쪽으로 끌려간다. 그러면 이동 샷의 시작
+    #   카메라 위치(clip_cx[0])가 인물에서 벗어난 채로 출발해, 컷이 바뀌자마자 인물이
+    #   화면 밖에 있다가 패닝으로 찾아가는 그림이 된다.
+    #   실측(2026-09-06 C안): 세그먼트 이음새 4.43s 에서 인물은 x=1762 인데 카메라가
+    #   x=985 로 시작해 6.97s 까지 2.5초를 패닝했다. np.interp 도 샷 경계를 가로질러
+    #   보간하므로 함께 잘라준다.
+    med_window = max(1, round(1.5 * args.sample_fps))
+    sample_times = np.array(idxs, dtype=np.float64)
+    face_cx_full = np.empty(total_frames, dtype=np.float64)
+    face_w_full = np.empty(total_frames, dtype=np.float64)
+    for _c0, _c1 in shots:
+        _f0 = int(round(_c0 * FPS))
+        _f1 = min(int(round(_c1 * FPS)), total_frames)
+        if _f0 >= _f1:
+            continue
+        _m = (sample_times >= _f0) & (sample_times < _f1)
+        if not _m.any():
+            _st, _cx, _w = sample_times, cx_interp, w_interp
+        else:
+            _st, _cx, _w = sample_times[_m], cx_interp[_m], w_interp[_m]
+        _cx_med = moving_median(np.asarray(_cx, dtype=np.float64), med_window)
+        _w_med = moving_median(np.asarray(_w, dtype=np.float64), med_window)
+        _ft = np.arange(_f0, _f1, dtype=np.float64)
+        # np.interp 는 범위 밖을 양 끝 값으로 고정한다 — 샷을 넘어가 섞이지 않는다.
+        face_cx_full[_f0:_f1] = np.interp(_ft, _st, _cx_med)
+        face_w_full[_f0:_f1] = np.interp(_ft, _st, _w_med)
 
     cut_infos = []
     last_static_x = None
@@ -418,12 +446,13 @@ def main():
         spread = float(np.max(clip_cx) - np.min(clip_cx))
 
         # 정적 샷(발화 중심 제자리) vs 이동 샷(실제 칠판 이동)
-        if dur < 3.5 or spread <= 280.0:
+        # 1.8초 미만의 극히 짧은 샷이거나 이동폭이 150px 이하인 제자리 발화만 정적 샷으로 고정
+        if dur < args.static_mindur or spread <= args.static_spread:
             med_cx = float(np.median(clip_cx))
             cam_x = np.clip(med_cx - crop_w / 2.0, 0, 3840 - crop_w)
             cam_x = round(cam_x / 2.0) * 2.0
-            # 이전 정적 샷과 위치 차이가 적으면(140px 미만) 동일 위치로 락(Lock)하여 호흡 컷 시 불필요한 미세 점프 방지
-            if last_static_x is not None and abs(cam_x - last_static_x) < 140.0:
+            # 이전 정적 샷과 위치 차이가 미세할 때만(60px 미만) 동일 위치로 락(Lock)하여 불필요한 미세 흔들림만 방지
+            if last_static_x is not None and abs(cam_x - last_static_x) < args.static_lock:
                 cam_x = last_static_x
             last_static_x = cam_x
             cut_infos.append(("static", c0, c1, cam_x))
@@ -432,7 +461,7 @@ def main():
             # 이동 샷: 등속도(Constant Speed) 트래킹
             # 이동할 때는 일정 속도(PAN_SPEED = 200.0 px/s)로 직선 등속 이동(Linear Glide)
             # 가속/감속이나 속도 급변 없이 일정한 속도로만 편안하게 이동한다.
-            PAN_SPEED = 480.0  # px / sec (민첩한 등속 패닝 속도: 걷는 속도에 맞춰 신속하게 도달)
+            PAN_SPEED = args.pan_speed  # px / sec (민첩한 등속 패닝 속도: 걷는 속도에 맞춰 신속하게 도달)
             step = PAN_SPEED / FPS
             deadzone = 0.10 * crop_w  # ~120px (인물이 항상 중앙 10% 내에 잘 머물도록 좁힌 데드존)
             cam = np.clip(clip_cx[0] - crop_w / 2.0, 0, 3840 - crop_w)

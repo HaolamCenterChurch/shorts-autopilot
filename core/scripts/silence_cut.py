@@ -3,13 +3,12 @@
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 
 import numpy as np
 
-FFMPEG = os.environ.get("SHORTS_FFMPEG_BIN") or shutil.which("ffmpeg") or "ffmpeg"
+FFMPEG = "/opt/homebrew/bin/ffmpeg"
 FPS = 30
 SR = 16000
 
@@ -229,6 +228,8 @@ def main():
                     help="이만큼도 못 지우는 무음은 컷하지 않는다(화면만 튄다)")
     ap.add_argument("--min-keep", type=float, default=1.20,
                     help="컷 사이 조각이 이보다 짧으면 덜 지우는 쪽 컷을 취소한다")
+    ap.add_argument("--preserve", default=None,
+                    help="청중 웃음/현장 리액션 등 절대 무음 처리하지 않고 보존할 구간 (s1-e1;s2-e2)")
     ap.add_argument("--workdir", required=True)
     args = ap.parse_args()
 
@@ -260,6 +261,23 @@ def main():
 
     deletes = build_delete_regions(runs, duration, args.pad, args.keep_gap,
                                    words, args.word_guard, args.min_gain)
+
+    # ★청중 웃음소리, 리액션, 현장 분위기 보존 구간 가드
+    if args.preserve:
+        pres_ranges = []
+        for r in args.preserve.split(";"):
+            if "-" in r:
+                p0, p1 = map(float, r.split("-"))
+                pres_ranges.append((p0, p1))
+        filtered_deletes = []
+        for d0, d1 in deletes:
+            overlap = any(max(d0, p0) < min(d1, p1) for p0, p1 in pres_ranges)
+            if not overlap:
+                filtered_deletes.append((d0, d1))
+            else:
+                log(f"[silence_cut] 청중 리액션/현장 분위기 보존 구간 [{d0:.2f}~{d1:.2f}] 무음 삭제 취소")
+        deletes = filtered_deletes
+
     deletes = enforce_min_keep(deletes, duration, args.min_keep)
     log(f"[silence_cut] 실제 삭제 구간 {len(deletes)}개")
 

@@ -25,6 +25,14 @@ def main():
     ap.add_argument("--sfx", default=None, help="합성된 SFX 오디오 파일 경로")
     ap.add_argument("--effects", default=None, help="줌인 및 스티커 설정 JSON 파일")
     ap.add_argument("--no-subs", action="store_true")
+    ap.add_argument("--band-top", type=int, default=0,
+                    help="상단에 만들 검정 밴드 높이 px. 0 이면 기존처럼 9:16 꽉 채운다")
+    ap.add_argument("--zoom-out", type=float, default=1.0,
+                    help="크롭 폭을 이 배율로 넓혀 화면을 줌아웃한다 (1.0 = 그대로)")
+    ap.add_argument("--band-bottom", type=int, default=0,
+                    help="하단에 만들 검정 밴드 높이 px (자막을 여기에 내릴 때)")
+    ap.add_argument("--band-crop-y", type=int, default=None,
+                    help="밴드 사용 시 원본에서 세로 크롭을 시작할 y (기본: 중앙보다 위)")
     args = ap.parse_args()
 
     with open(args.track, "r", encoding="utf-8") as f:
@@ -81,7 +89,29 @@ def main():
     filter_chains = []
 
     # 1. 크롭 및 1080x1920 스케일
-    filter_chains.append(f"[0:v]crop=w={crop_w}:h=2160:x='{expr}':y=0,scale=1080:1920:flags=lanczos[v_base]")
+    if args.zoom_out and args.zoom_out != 1.0:
+        # 크롭 폭을 넓혀 더 넓은 화각을 담는다. 중심을 유지하도록 x 를 절반만큼 당기고
+        # 프레임 밖으로 나가지 않게 표현식 안에서 clip 한다.
+        new_w = int(round(crop_w * args.zoom_out / 2.0) * 2)
+        new_w = min(new_w, 3840)
+        off = (new_w - crop_w) / 2.0
+        expr = f"max(0\\,min({3840 - new_w}\\,({expr})-{off:.1f}))"
+        crop_w = new_w
+
+    if args.band_top > 0:
+        # 상단 밴드: 영상 영역을 1080x(1920-band) 로 만들고 그 아래로 내린다.
+        # 원본에서 세로를 덜 잡아 크롭하므로 인물이 더 크게 잡힌다(레터박스 아님).
+        vid_h = 1920 - args.band_top - args.band_bottom
+        crop_h = int(round(crop_w * vid_h / 1080.0))
+        crop_h = min(crop_h, 2160)
+        cy = args.band_crop_y if args.band_crop_y is not None else max(0, (2160 - crop_h) // 3)
+        cy = max(0, min(cy, 2160 - crop_h))
+        filter_chains.append(
+            f"[0:v]crop=w={crop_w}:h={crop_h}:x='{expr}':y={cy},"
+            f"scale=1080:{vid_h}:flags=lanczos,"
+            f"pad=1080:1920:0:{args.band_top}:black[v_base]")
+    else:
+        filter_chains.append(f"[0:v]crop=w={crop_w}:h=2160:x='{expr}':y=0,scale=1080:1920:flags=lanczos[v_base]")
     cur_v = "v_base"
 
     # 2. 줌인 (Punch-in Zoom)

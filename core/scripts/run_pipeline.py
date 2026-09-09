@@ -38,8 +38,11 @@ def transcribe_words(video_path, workdir, prefix):
     extract_wav(video_path, wav_path)
     out_prefix = os.path.join(workdir, prefix)
     cmd = [WHISPER_BIN, "-m", WHISPER_MODEL, "-l", "ko", "-oj", "-ojf",
-           "--beam-size", "5", "--temperature", "0", "-f", wav_path,
-           "-of", out_prefix]
+           "--beam-size", "5", "--temperature", "0",
+           # ★DTW 를 켜야 실제 발화 시각(t_dtw)이 나온다. flash-attn 이 켜져 있으면
+           #   --dtw 를 줘도 조용히 무시되므로 --no-flash-attn 을 반드시 같이 준다.
+           "--dtw", "large.v3", "--no-flash-attn",
+           "-f", wav_path, "-of", out_prefix]
     log(f"[run_pipeline] whisper 단어 타임스탬프 전사: {prefix}")
     subprocess.run(cmd, check=True)
 
@@ -52,7 +55,11 @@ def transcribe_words(video_path, workdir, prefix):
               errors="surrogateescape") as f:
         data = json.load(f)
 
-    byte_times = []  # (바이트, t0, t1)
+    # ★whisper 기본 타임스탬프(offsets)는 반올림 heuristic 이라 실제 발화보다 앞선다.
+    #   2026-09-05 실측(54초 마스터, 유효토큰 212개): 평균 0.336초·중앙 0.315초 빠르고
+    #   24.1%는 0.5초 이상 빨랐다 — 오너가 "자막이 너무 빠르다"고 한 그것이다.
+    #   cross-attention DTW 가 낸 t_dtw(센티초)가 실제 발화 시각이므로 그걸 정본으로 쓴다.
+    toks = []
     for seg in data.get("transcription", []):
         for tok in seg.get("tokens", []):
             text = tok.get("text", "")
@@ -60,10 +67,38 @@ def transcribe_words(video_path, workdir, prefix):
             if text.startswith("[_") and text.endswith("]"):
                 continue
             offsets = tok.get("offsets", {})
-            t0 = offsets.get("from", 0) / 1000.0
-            t1 = offsets.get("to", 0) / 1000.0
-            for b in text.encode("utf-8", "surrogateescape"):
-                byte_times.append((b, t0, t1))
+            toks.append({
+                "text": text,
+                "n0": offsets.get("from", 0) / 1000.0,
+                "n1": offsets.get("to", 0) / 1000.0,
+                "dtw": tok.get("t_dtw", -1),
+            })
+
+    n_dtw = sum(1 for t in toks if t["dtw"] != -1)
+    use_dtw = bool(toks) and n_dtw >= len(toks) * 0.5
+    if use_dtw:
+        log(f"[run_pipeline] t_dtw 적용: {n_dtw}/{len(toks)} 토큰")
+        # 시작 시각은 t_dtw, 끝 시각은 다음 토큰의 시작(무간극). 마지막만 offsets 의 끝.
+        starts = []
+        prev = 0.0
+        for t in toks:
+            s0 = t["dtw"] / 100.0 if t["dtw"] != -1 else t["n0"]
+            if s0 < prev:  # DTW 가 역행하면 직전 값으로 고정한다
+                s0 = prev
+            starts.append(s0)
+            prev = s0
+        for i, t in enumerate(toks):
+            t["t0"] = starts[i]
+            t["t1"] = starts[i + 1] if i + 1 < len(toks) else max(t["n1"], starts[i])
+    else:
+        log(f"[run_pipeline] ⚠t_dtw 부족({n_dtw}/{len(toks)}) — 기본 타임스탬프로 폴백")
+        for t in toks:
+            t["t0"], t["t1"] = t["n0"], t["n1"]
+
+    byte_times = []  # (바이트, t0, t1)
+    for t in toks:
+        for b in t["text"].encode("utf-8", "surrogateescape"):
+            byte_times.append((b, t["t0"], t["t1"]))
 
     decoder = codecs.getincrementaldecoder("utf-8")("replace")
     words = []
@@ -106,13 +141,34 @@ def stage_a(src, plan, workdir, plan_path=None):
     raw_words_path, _ = transcribe_words(raw_path, workdir, f"{slug}_raw")
 
     master_path = os.path.join(workdir, f"{slug}_master.mov")
-    run_module("silence_cut.py", [
+    # plan 의 "silence" 로만 덮어쓴다. 키가 없으면 아래 기본값 = 종전과 동일.
+    sil = plan.get("silence") or {}
+    silence_args = [
         "--in", raw_path, "--out", master_path,
         "--words", raw_words_path,
-        "--min-silence", "0.30", "--pad", "0.12", "--keep-gap", "0.06",
-        "--min-gain", "0.40", "--min-keep", "1.20",
+        "--min-silence", str(sil.get("min_silence", "0.30")),
+        "--pad", str(sil.get("pad", "0.12")),
+        "--keep-gap", str(sil.get("keep_gap", "0.06")),
+        "--min-gain", str(sil.get("min_gain", "0.40")),
+        "--min-keep", str(sil.get("min_keep", "1.20")),
         "--workdir", workdir,
-    ])
+    ]
+    if "preserve" in plan and plan["preserve"]:
+        # plan 의 preserve 는 원본(src) 절대시간이고, silence_cut 이 보는 것은
+        # 세그먼트를 이어붙인 raw 시간축이다. 변환하지 않으면 통째로 무시된다.
+        acc = 0.0
+        pres = []
+        for ss, se in plan["segments"]:
+            for ps, pe in plan["preserve"]:
+                lo, hi = max(ps, ss), min(pe, se)
+                if hi > lo:
+                    pres.append((acc + (lo - ss), acc + (hi - ss)))
+            acc += se - ss
+        if pres:
+            pres_str = ";".join(f"{a:.3f}-{b:.3f}" for a, b in pres)
+            log(f"[run_pipeline] preserve src→raw 변환: {pres_str}")
+            silence_args.extend(["--preserve", pres_str])
+    run_module("silence_cut.py", silence_args)
 
     master_words_path, _ = transcribe_words(master_path, workdir, f"{slug}_master")
 
@@ -124,6 +180,14 @@ def stage_a(src, plan, workdir, plan_path=None):
     ]
     if plan_path:
         track_args.extend(["--plan", plan_path])
+    # plan 의 "track" 으로 정적 락 임계값을 회차별로 조정한다(없으면 표준값 그대로).
+    tr = plan.get("track") or {}
+    for key, flag in (("static_spread", "--static-spread"),
+                      ("static_mindur", "--static-mindur"),
+                      ("static_lock", "--static-lock"),
+                      ("pan_speed", "--pan-speed")):
+        if key in tr:
+            track_args.extend([flag, str(tr[key])])
     run_module("track_crop.py", track_args)
 
     with open(master_path + ".cuts.json", "r", encoding="utf-8") as f:
@@ -155,17 +219,53 @@ def stage_b(plan, workdir, outdir, chunks_path, state=None):
             duration = json.load(f)["duration"]
 
     ass_path = os.path.join(workdir, f"{slug}.ass")
-    run_module("make_ass.py", [
+    ass_args = [
         "--words", master_words_path, "--chunks", chunks_path,
         "--out", ass_path, "--duration", str(duration),
-    ])
+    ]
+    # plan 의 "subs" 로 자막 스타일을 회차별로 조정한다(없으면 표준 2단 자막 그대로).
+    subs = plan.get("subs") or {}
+    if subs.get("no_en"):
+        ass_args.append("--no-en")
+    if "shadow" in subs:
+        ass_args += ["--shadow", str(subs["shadow"])]
+    if "font_size" in subs:
+        ass_args += ["--font-size", str(subs["font_size"])]
+    if "margin_v" in subs:
+        ass_args += ["--margin-v", str(subs["margin_v"])]
+    if subs.get("badge"):
+        ass_args += ["--badge", subs["badge"]]
+        if subs.get("badge_margin"):
+            ass_args += ["--badge-margin", str(subs["badge_margin"])]
+    if "last_tail" in subs:
+        ass_args += ["--last-tail", str(subs["last_tail"])]
+    if "margin_lr" in subs:
+        ass_args += ["--margin-lr", str(subs["margin_lr"])]
+    if "outline" in subs:
+        ass_args += ["--outline", str(subs["outline"])]
+    if "top_title_outline" in subs:
+        ass_args += ["--top-title-outline", str(subs["top_title_outline"])]
+    if subs.get("top_title"):
+        ass_args += ["--top-title", subs["top_title"]]
+        if subs.get("top_title_size"):
+            ass_args += ["--top-title-size", str(subs["top_title_size"])]
+        if subs.get("top_title_margin"):
+            ass_args += ["--top-title-margin", str(subs["top_title_margin"])]
+    run_module("make_ass.py", ass_args)
 
     os.makedirs(outdir, exist_ok=True)
     final_path = os.path.join(outdir, f"{slug}.mp4")
-    run_module("render_vertical.py", [
-        "--in", master_path, "--track", track_json, "--ass", ass_path,
-        "--out", final_path,
-    ])
+    rv_args = ["--in", master_path, "--track", track_json, "--ass", ass_path,
+               "--out", final_path]
+    if subs.get("band_top"):
+        rv_args += ["--band-top", str(subs["band_top"])]
+        if subs.get("zoom_out"):
+            rv_args += ["--zoom-out", str(subs["zoom_out"])]
+        if subs.get("band_bottom"):
+            rv_args += ["--band-bottom", str(subs["band_bottom"])]
+        if subs.get("band_crop_y") is not None:
+            rv_args += ["--band-crop-y", str(subs["band_crop_y"])]
+    run_module("render_vertical.py", rv_args)
 
     script_path = os.path.join(workdir, f"{slug}_script.txt")
     with open(script_path, "w", encoding="utf-8") as f:

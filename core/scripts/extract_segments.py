@@ -3,11 +3,10 @@
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 
-FFMPEG = os.environ.get("SHORTS_FFMPEG_BIN") or shutil.which("ffmpeg") or "ffmpeg"
+FFMPEG = "/opt/homebrew/bin/ffmpeg"
 FPS = 30
 
 ENCODE_ARGS = [
