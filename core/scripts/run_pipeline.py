@@ -9,10 +9,12 @@ import os
 import subprocess
 import sys
 
-FFMPEG = "/opt/homebrew/bin/ffmpeg"
-WHISPER_BIN = "/Users/caleb/Desktop/Whisper/whisper.cpp/build/bin/whisper-cli"
-WHISPER_MODEL = "/Users/caleb/Desktop/Whisper/whisper.cpp/models/ggml-large-v3.bin"
-YUNET_MODEL = "/Users/caleb/Documents/HaolamShorts/2026-08-30_11-44-30/work/yunet.onnx"
+import env_discovery
+
+FFMPEG = env_discovery.get_ffmpeg()
+WHISPER_BIN = env_discovery.get_whisper_bin()
+WHISPER_MODEL = env_discovery.get_whisper_model()
+YUNET_MODEL = env_discovery.get_yunet_model()
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 

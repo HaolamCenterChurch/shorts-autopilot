@@ -39,13 +39,33 @@ description: 16:9 원본 설교 영상 하나만으로 편집 프로그램을 �
 
 ---
 
-## 🛠️ 실행 환경 및 필수 도구
+## 🛠️ 오픈소스 기술 스택 & 단계별 프로그램 역할
 
-* **Python**: `/Users/caleb/Documents/AgentGem/.venv-cv/bin/python3` (OpenCV, NumPy, Pillow)
-* **도구 경로**: `/Users/caleb/Documents/AgentGem/scripts/shorts_v2/`
-* **Whisper CLI**: `/Users/caleb/Desktop/Whisper/whisper.cpp/build/bin/whisper-cli` (모델: `ggml-large-v3.bin`)
-* **얼굴 검출**: OpenCV Zoo YuNet (`yunet.onnx`, 384x384 입력)
-* **표준 폰트**: `Apple SD Gothic Neo, Bold` (PlayRes 1080x1920)
+본 파이프라인은 상용 솔루션이나 특정 개인 환경에 종속되지 않는 **순수 오픈소스 생태계**로 동작합니다.
+
+| 단계 | 공정 | 오픈소스 도구 / 모델 | 세부 역할 및 기술적 이유 |
+|---|---|---|---|
+| **1** | **DTW 전사** | **`Whisper.cpp`** (`whisper-cli`)<br>+ `ggml-large-v3.bin` | C/C++ 네이티브 Metal/CUDA 가속. 토큰별 단어(words) 센티초 단위 정밀 타임스탬프(`t_dtw`) 추출 |
+| **2** | **무음/호흡 컷** | **`FFmpeg`** (`silencedetect`)<br>+ `Python` | -30dB~-26dB 기준 발화 간격 무음 탐지, 0.15s 안전 패딩 및 현장 회중 리액션 보존(`preserve`) |
+| **3** | **인물 추적** | **`OpenCV DNN`** (`cv2.FaceDetectorYN`)<br>+ `yunet.onnx` 모델 | 가벼운 실시간 얼굴 검출. 480px/s 등속 글라이드 패닝 및 컷 경계 0.5f 스냅 9:16 크롭 좌표 계산 |
+| **4** | **자막 렌더** | **`Python`** + **`ASS`** 포맷<br>+ **`FFmpeg`** (`libass`) | 90pt 한글 단독 1줄(12~16자) + 96pt 상단 고정 제목. OS별 폰트 폴백(어그로체/Pretendard/시스템고딕) |
+| **5** | **자막 기계감사**| **`Python`** (`check_chunks.py`) | 자막 청크 텍스트와 전사 단어 목록의 어절·순서 불일치를 기계적으로 전수 대조 (Gate 3 Hard Gate) |
+| **6** | **영상 인코딩** | **`FFmpeg`** (하드웨어 가속) | macOS `h264_videotoolbox`, NVIDIA `h264_nvenc`, 범용 Linux/CPU `libx264` 자동 선택 |
+| **7** | **오디오 믹싱** | **`FFmpeg`** (`amix`, `afade`)<br>+ **`NumPy`** 신호 합성 | 대사 100% + 45ms 미니멀 버블팝 SFX 45% 배합. 샘플 부재 시 900→1800Hz 사인파 자동 합성 폴백 |
+| **8** | **품질 교차검증**| **`Whisper.cpp`** + `difflib` | 완성 MP4 오디오를 재전사하여 대본과 95.0% 이상 일치하는지 자동 판정 (Gate 4 & Gate 8) |
+| **9** | **썸네일 합성** | **`Pillow`** (PIL) | 클린 마스터 9:16 프레임 기반 2단 훅 타이포 및 인스타 4:5 안전영역 가이드 동시 출력 |
+
+---
+
+## 🌐 크로스플랫폼 동적 도구 탐색 (`env_discovery.py`)
+
+파이프라인 실행 시 `env_discovery.py`가 아래 우선순위로 도구와 모델을 동적으로 자동 감지합니다:
+1. **환경변수**: `WHISPER_BIN`, `WHISPER_MODEL`, `YUNET_MODEL`, `FFMPEG_BIN`, `FFPROBE_BIN`
+2. **로컬 프로젝트**: `./models/` (예: `models/yunet.onnx`, `models/ggml-large-v3.bin`)
+3. **시스템 PATH & 패키지 매니저**: Homebrew(`/opt/homebrew/bin`), APT(`/usr/bin`), `~/.local/bin`
+4. **글로벌 캐시 디렉토리**: `~/.cache/whisper.cpp/`, `~/.cache/shorts_autopilot/`
+
+*실행 명령어 예시의 `python3`는 OpenCV(cv2), NumPy, Pillow가 설치된 가상환경 파이썬을 가리키며, 스크립트 경로는 프로젝트 기준 상대경로(`scripts/shorts_v2/`)로 표기합니다.*
 
 ---
 
@@ -112,14 +132,14 @@ description: 16:9 원본 설교 영상 하나만으로 편집 프로그램을 �
 
 ### [Phase 2] Stage A 실행 (컷 추출 + 무음 제거 + DTW 전사 + 인물 추적) (Gate 2)
 ```bash
-/Users/caleb/Documents/AgentGem/.venv-cv/bin/python3 /Users/caleb/Documents/AgentGem/scripts/shorts_v2/run_pipeline.py \
+python3 scripts/shorts_v2/run_pipeline.py \
   --src "{원본_영상_경로.mp4}" --plan "{영상폴더}/plans/plan_{ID}.json" \
   --outdir "{영상폴더}/v2/out" --stage a
 ```
 * **간투사·반복 발화·뜸 제거 필수 절차**:  
   `silence_cut.py`는 유음 간투사("어", "그", 반복 발화)를 못 잡으므로 반드시 검출기를 실행한다 (`MIN_VOICE = 0.30` 기준):
   ```bash
-  /Users/caleb/Documents/AgentGem/.venv-cv/bin/python3 /Users/caleb/Documents/AgentGem/scripts/shorts_v2/find_filler.py "{영상폴더}/v2/out/_work/{slug}"
+  python3 scripts/shorts_v2/find_filler.py "{영상폴더}/v2/out/_work/{slug}"
   ```
   검출된 구간은 아래 파이썬 스니펫으로 master 시간 ➔ raw ➔ src(원본 절대시간)로 역매핑하여 `plan.segments`를 쪼개어 삭제한 뒤 Stage A를 재실행한다:
   ```python
@@ -149,7 +169,7 @@ description: 16:9 원본 설교 영상 하나만으로 편집 프로그램을 �
    * ⚠ Whisper 재전사가 흔들려 불일치가 나면 `stt`를 억지로 넣지 말고 **오히려 지워서** `ko`와 맞춘다.
 2. **`check_chunks.py` 기계 검증 (단독 실행 필수)**:
 ```bash
-/Users/caleb/Documents/AgentGem/.venv-cv/bin/python3 /Users/caleb/Documents/AgentGem/scripts/shorts_v2/check_chunks.py \
+python3 scripts/shorts_v2/check_chunks.py \
   --words "{영상폴더}/v2/out/_work/{slug}_master.words.json" \
   --chunks "{영상폴더}/v2/out/_work/chunks_{ID}.json"
 ```
@@ -158,7 +178,7 @@ description: 16:9 원본 설교 영상 하나만으로 편집 프로그램을 �
 ### [Phase 4] Stage B 렌더링 & 음성 전사 대조 검증 (Gate 4)
 * 묵은 렌더 방지: `rm -f "{영상폴더}/v2/out/_work/{slug}_raw.mp4"` 선행 실행.
 ```bash
-/Users/caleb/Documents/AgentGem/.venv-cv/bin/python3 /Users/caleb/Documents/AgentGem/scripts/shorts_v2/run_pipeline.py \
+python3 scripts/shorts_v2/run_pipeline.py \
   --src "{원본_영상_경로.mp4}" --plan "{영상폴더}/plans/plan_{ID}.json" \
   --outdir "{영상폴더}/v2/out" --stage b --chunks "{영상폴더}/v2/out/_work/chunks_{ID}.json"
 ```
@@ -166,7 +186,7 @@ description: 16:9 원본 설교 영상 하나만으로 편집 프로그램을 �
 
 ### [Phase 5] 클린 마스터에서 9:16 썸네일 프레임 추출 (Gate 5)
 ```bash
-/Users/caleb/Documents/AgentGem/.venv-cv/bin/python3 /Users/caleb/Documents/AgentGem/scripts/shorts_v2/extract_clean_frames.py \
+python3 scripts/shorts_v2/extract_clean_frames.py \
   --master "{영상폴더}/v2/out/_work/{slug}_master.mov" \
   --track "{영상폴더}/v2/out/_work/{slug}_track.json" \
   --times 10 18 24 35 48 --outdir "{영상폴더}/v2/out/thumbnails_preview" --prefix "{ID}_frame"
@@ -175,7 +195,7 @@ description: 16:9 원본 설교 영상 하나만으로 편집 프로그램을 �
 
 ### [Phase 6] 썸네일 4종 생성 & 앞뒤 시네마틱 페이드 결합 (Gate 6)
 ```bash
-/Users/caleb/Documents/AgentGem/.venv-cv/bin/python3 /Users/caleb/Documents/AgentGem/scripts/shorts_v2/generate_thumbnail.py \
+python3 scripts/shorts_v2/generate_thumbnail.py \
   --mode both --frame "{선정프레임_경로}.jpg" --badge "하올람 말씀 인사이트" \
   --l1 "{타이틀 1행}" --l2 "{타이틀 2행(골드)}" --sub "{서브 티저}" --zoom 0.86 \
   --out-yt "{영상폴더}/v2/out/{slug}_thumb_youtube.jpg" \
@@ -192,7 +212,7 @@ cp "{영상폴더}/v2/out/{slug}_thumb_youtube.jpg" "{영상폴더}/v2/out/{slug
 
 ### [Phase 8] 시간·모션 하드 게이트 검증 (Gate 8 Hard Gate)
 ```bash
-/Users/caleb/Documents/AgentGem/.venv-cv/bin/python3 /Users/caleb/Documents/AgentGem/scripts/shorts_v2/check_output.py \
+python3 scripts/shorts_v2/check_output.py \
   --outdir "{영상폴더}/v2/out" --slug "{slug}"
 ```
 * 🛑 **Gate 8 통과 기준 (❌ 0건 필수, G-D 10~20%는 ⚠️ 경고 통과이나 권장 20% 이상)**:

@@ -5,11 +5,26 @@ import json
 import os
 import subprocess
 import sys
+from env_discovery import get_ffmpeg, get_ffprobe, get_fonts_dirs, get_stickers_dir
 
-FFMPEG = "/opt/homebrew/bin/ffmpeg"
-FFPROBE = "/opt/homebrew/bin/ffprobe"
-FONTS_DIR = "/Users/caleb/Library/Fonts"
-STICKERS_DIR = "/Users/caleb/Documents/AgentGem/scripts/shorts_v2/assets/stickers"
+FFMPEG = get_ffmpeg()
+FFPROBE = get_ffprobe()
+_fonts_dirs = get_fonts_dirs()
+FONTS_DIR = _fonts_dirs[0] if _fonts_dirs else ""
+STICKERS_DIR = get_stickers_dir()
+
+
+def get_video_encoder():
+    """OS 및 FFmpeg 빌드에 따른 최적의 H.264 인코더 자동 선택."""
+    try:
+        res = subprocess.run([FFMPEG, "-encoders"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if "h264_videotoolbox" in res.stdout and sys.platform == "darwin":
+            return "h264_videotoolbox", ["-b:v", "16M", "-maxrate", "20M"]
+        elif "h264_nvenc" in res.stdout:
+            return "h264_nvenc", ["-cq", "19", "-preset", "p4"]
+    except Exception:
+        pass
+    return "libx264", ["-crf", "18", "-preset", "fast"]
 
 
 def log(msg):
@@ -150,11 +165,12 @@ def main():
 
     filter_complex_str = ";".join(filter_chains)
 
+    enc_name, enc_opts = get_video_encoder()
     cmd = [
         FFMPEG, "-y", *inputs,
         "-filter_complex", filter_complex_str,
         "-map", "[v_out]", "-map", *audio_map,
-        "-c:v", "h264_videotoolbox", "-b:v", "16M", "-maxrate", "20M",
+        "-c:v", enc_name, *enc_opts,
         "-pix_fmt", "yuv420p", "-r", "30",
         "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         "-movflags", "+faststart",

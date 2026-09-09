@@ -8,9 +8,11 @@ import re
 import subprocess
 import sys
 
-FFMPEG = "/opt/homebrew/bin/ffmpeg"
-WHISPER_BIN = "/Users/caleb/Desktop/Whisper/whisper.cpp/build/bin/whisper-cli"
-WHISPER_MODEL = "/Users/caleb/Desktop/Whisper/whisper.cpp/models/ggml-large-v3.bin"
+import env_discovery
+
+FFMPEG = env_discovery.get_ffmpeg()
+WHISPER_BIN = env_discovery.get_whisper_bin()
+WHISPER_MODEL = env_discovery.get_whisper_model()
 
 
 def log(msg):

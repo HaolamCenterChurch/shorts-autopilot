@@ -12,28 +12,14 @@ import os
 import sys
 from PIL import Image, ImageDraw, ImageFont
 
-# 폰트 탐색 (어그로체 우선, 시스템 산세리프 폴백)
+from env_discovery import find_font
+
+# 폰트 탐색 (어그로체 우선, OS별 고딕/산세리프 동적 폴백)
 def get_fonts():
-    aggro_b_candidates = [
-        "/Users/caleb/Library/Fonts/SB 어그로OTF B.otf",
-        "/Library/Fonts/SB 어그로OTF B.otf",
-        os.path.expanduser("~/Library/Fonts/SB 어그로OTF B.otf"),
-    ]
-    aggro_m_candidates = [
-        "/Users/caleb/Library/Fonts/SB 어그로OTF M.otf",
-        "/Library/Fonts/SB 어그로OTF M.otf",
-        os.path.expanduser("~/Library/Fonts/SB 어그로OTF M.otf"),
-    ]
-    aggro_l_candidates = [
-        "/Users/caleb/Library/Fonts/SB 어그로OTF L.otf",
-        "/Library/Fonts/SB 어그로OTF L.otf",
-        os.path.expanduser("~/Library/Fonts/SB 어그로OTF L.otf"),
-    ]
-    sys_sans = "/System/Library/Fonts/AppleSDGothicNeo.ttc"
-    
-    fb = next((p for p in aggro_b_candidates if os.path.exists(p)), sys_sans)
-    fm = next((p for p in aggro_m_candidates if os.path.exists(p)), sys_sans)
-    fl = next((p for p in aggro_l_candidates if os.path.exists(p)), sys_sans)
+    fb = find_font("bold")
+    fm = find_font("medium")
+    fl = find_font("regular")
+    sys_sans = find_font("regular")
     return fb, fm, fl, sys_sans
 
 FONT_B, FONT_M, FONT_L, FONT_SANS = get_fonts()

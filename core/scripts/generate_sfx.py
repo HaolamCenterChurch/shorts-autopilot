@@ -13,12 +13,17 @@ import numpy as np
 SR = 48000
 
 def get_pop_sample():
-    # 1. 로컬 assets/sfx 디렉토리 우선 탐색
+    # 1. 로컬 assets/sfx 디렉토리 및 환경변수 우선 탐색
     script_dir = os.path.dirname(os.path.abspath(__file__))
     local_asset = os.path.join(script_dir, "assets", "sfx", "01_미니멀_버블팝_초미세.wav")
-    system_sample = "/Users/caleb/Documents/HaolamShorts/sfx_audition/01_미니멀_버블팝_초미세.wav"
+    env_sample = os.environ.get("SFX_POP_SAMPLE")
+    user_sample = os.path.expanduser("~/Documents/HaolamShorts/sfx_audition/01_미니멀_버블팝_초미세.wav")
     
-    sample_path = local_asset if os.path.exists(local_asset) else (system_sample if os.path.exists(system_sample) else None)
+    sample_path = None
+    for cand in [env_sample, local_asset, user_sample]:
+        if cand and os.path.exists(cand):
+            sample_path = cand
+            break
     
     if sample_path and os.path.exists(sample_path):
         try:
