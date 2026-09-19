@@ -24,7 +24,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Main,Apple SD Gothic Neo,{FS},&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,{OUTLINE},{SHADOW},2,{MLR},{MLR},{MV},1{TOPSTYLE}{BADGESTYLE}
+Style: Main,Apple SD Gothic Neo,{FS},&H00FFFFFF,&H000000FF,{BOXCOL},{BOXCOL},-1,0,0,0,100,100,0,0,{BORDER},{OUTLINE},{SHADOW},2,{MLR},{MLR},{MV},1{TOPSTYLE}{BADGESTYLE}
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -95,10 +95,13 @@ def match_chunks_to_words(words, chunks):
     return results
 
 
-def build_dialogue_text(en, ko, hl, no_en=False, fs=68):
+def build_dialogue_text(en, ko, hl, no_en=False, fs=68, pop=True):
     ko = ko or ""
     en = "" if no_en else (en or "")
-    if hl:
+    if hl and not pop:
+        # 박스 자막: 박스가 같이 출렁여 어색하므로 팝 없이 골드 컬러로만 강조 (오너 2026-09-19)
+        ko_tag = r"{\fs" + str(fs) + r"\c&H00E5FF&}"
+    elif hl:
         # 하이라이트 자막: 골드 컬러(&H00E5FF&) + 팝인 바운스 애니메이션 (118% -> 100%)
         ko_tag = (r"{\t(0,80,\fscx118\fscy118)\t(80,160,\fscx100\fscy100)\fs"
                   + str(fs) + r"\c&H00E5FF&}")
@@ -134,6 +137,12 @@ def main():
                     help="자막 좌우 여백 px (기본 60)")
     ap.add_argument("--outline", type=float, default=4.0,
                     help="자막 테두리(스트로크) 두께. 0 이면 테두리 없음 (기본 4.0)")
+    ap.add_argument("--box", action="store_true",
+                    help="본문 자막을 줄마다 검은 박스로 깐다(BorderStyle 3). 강조 팝 애니메이션은 끈다")
+    ap.add_argument("--box-pad", type=float, default=20.0,
+                    help="박스 안쪽 여백 px (기본 20)")
+    ap.add_argument("--box-alpha", default="1A",
+                    help="박스 투명도 16진수 00=불투명 FF=투명 (기본 1A, 약 90%% 불투명)")
     ap.add_argument("--top-title-outline", type=float, default=6.0,
                     help="상단 제목 테두리 두께. 0 이면 테두리 없음 (기본 6.0)")
     ap.add_argument("--shadow", type=float, default=2.0,
@@ -199,7 +208,9 @@ def main():
                        .replace("{FS}", str(args.font_size)) \
                        .replace("{MLR}", str(args.margin_lr)) \
                        .replace("{SHADOW}", f"{args.shadow:.1f}") \
-                       .replace("{OUTLINE}", f"{args.outline:.1f}") \
+                       .replace("{OUTLINE}", f"{args.box_pad if args.box else args.outline:.1f}") \
+                       .replace("{BORDER}", "3" if args.box else "1") \
+                       .replace("{BOXCOL}", f"&H{args.box_alpha}000000" if args.box else "&H00000000") \
                        .replace("{TOPSTYLE}", top_style)
     lines = [header]
     if args.badge:
@@ -215,7 +226,7 @@ def main():
             e = s + 0.01
         text = build_dialogue_text(chunk.get("en"), chunk.get("ko", ""),
                                     chunk.get("hl", False), no_en=args.no_en,
-                                    fs=args.font_size)
+                                    fs=args.font_size, pop=not args.box)
         lines.append(
             f"Dialogue: 0,{fmt_time(s)},{fmt_time(e)},Main,,0,0,0,,{text}\n")
 

@@ -245,6 +245,10 @@ def stage_b(plan, workdir, outdir, chunks_path, state=None):
         ass_args += ["--margin-lr", str(subs["margin_lr"])]
     if "outline" in subs:
         ass_args += ["--outline", str(subs["outline"])]
+    if subs.get("box"):
+        ass_args.append("--box")
+        if "box_pad" in subs:
+            ass_args += ["--box-pad", str(subs["box_pad"])]
     if "top_title_outline" in subs:
         ass_args += ["--top-title-outline", str(subs["top_title_outline"])]
     if subs.get("top_title"):
