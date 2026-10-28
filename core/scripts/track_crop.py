@@ -215,8 +215,9 @@ def snap_cuts_to_visual(in_path, cuts, fps=FPS):
         if c <= 0.1 or c >= (total_frames - 1) / float(fps) - 0.1:
             continue
         approx_f = int(round(c * fps))
-        start_f = max(0, approx_f - 4)
-        end_f = min(total_frames - 1, approx_f + 5)
+        # ±7프레임: 구간 길이 합산 시각은 인코딩 반올림이 누적돼 4~6프레임 어긋난다 (2026-09-15 A편 6프레임 실측)
+        start_f = max(0, approx_f - 7)
+        end_f = min(total_frames - 1, approx_f + 7)
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_f)
         diffs = []
         prev = None
@@ -230,7 +231,9 @@ def snap_cuts_to_visual(in_path, cuts, fps=FPS):
             prev = frame
         if diffs:
             best_f, best_d = max(diffs, key=lambda x: x[1])
-            if best_d >= 3.5:
+            med_d = float(np.median([d for _, d in diffs]))
+            # 같은 장면을 이어 붙인 점프컷은 변화량이 작다 — 절대값이 낮아도 창 안에서 뚜렷한 봉우리면 채택
+            if best_d >= 3.5 or (best_d >= 1.5 and best_d >= 3.0 * max(med_d, 0.1)):
                 snapped.append(best_f / float(fps))
             else:
                 snapped.append(c)
@@ -241,12 +244,26 @@ def snap_cuts_to_visual(in_path, cuts, fps=FPS):
 
 
 def find_shot_boundaries(in_path, cuts_path, plan_path, total_duration):
-    """cuts.json 및 plan.json 기반으로 마스터 영상의 모든 컷(샷) 경계를 추출한다."""
+    """plan.json의 세그먼트 경계를 기반으로 마스터 영상의 '진짜 씬 전환(점프 컷)' 경계만 추출한다.
+
+    ★주의: cuts.json의 무음 제거(silence cuts)는 단순 호흡/공백 제거이므로 샷을 쪼개지 않는다!
+    무음 제거 경계마다 샷을 쪼개면 동일 발화 중에도 1~2초마다 카메라가 정지했다가
+    순간이동(점프)하는 뚝뚝거림이 발생한다.
+    """
     master_cuts = [0.0]
 
-    # 1. plan.json 의 원본 세그먼트 경계 추출
+    # 1. plan.json 의 원본 세그먼트 경계 추출 (raw 타임라인 기준 초)
     raw_cuts = []
-    if plan_path and os.path.exists(plan_path):
+    # ★실제 이어 붙인 결과(segmap)를 우선한다 — plan 구간 길이 합산은 반올림이 누적돼 프레임이 어긋난다 (2026-09-15)
+    segmap_path = in_path.replace("_master.mov", "_raw.mov.segmap.json")
+    if in_path.endswith("_master.mov") and os.path.exists(segmap_path):
+        try:
+            with open(segmap_path, "r", encoding="utf-8") as f:
+                raw_cuts = [sg["dst_start"] for sg in json.load(f)["segments"][1:]]
+            log(f"[track_crop] segmap 기준 이음매 {len(raw_cuts)}곳")
+        except Exception as err:
+            log(f"[track_crop] segmap 읽기 실패: {err}")
+    if not raw_cuts and plan_path and os.path.exists(plan_path):
         try:
             with open(plan_path, "r", encoding="utf-8") as f:
                 pdata = json.load(f)
@@ -257,25 +274,36 @@ def find_shot_boundaries(in_path, cuts_path, plan_path, total_duration):
         except Exception as err:
             log(f"[track_crop] plan.json 읽기 실패: {err}")
 
-    # 2. cuts.json (무음 제거 컷 구간) 반영
-    if cuts_path and os.path.exists(cuts_path):
+    # 2. raw 세그먼트 경계를 마스터 타임라인(무음 제거 후) 좌표로 변환
+    if raw_cuts and cuts_path and os.path.exists(cuts_path):
         try:
             with open(cuts_path, "r", encoding="utf-8") as f:
                 cdata = json.load(f)
-            master_t = 0.0
-            for k0, k1 in cdata.get("keeps", []):
-                dur = k1 - k0
-                for rc in raw_cuts:
-                    if k0 < rc < k1:
-                        split_master = master_t + (rc - k0)
-                        master_cuts.append(split_master)
-                master_t += dur
-                master_cuts.append(master_t)
+            keeps = cdata.get("keeps", [])
+            for rc in raw_cuts:
+                master_t = 0.0
+                mapped = False
+                for k0, k1 in keeps:
+                    if k0 <= rc <= k1:
+                        master_cuts.append(master_t + (rc - k0))
+                        mapped = True
+                        break
+                    elif rc < k0:
+                        # 무음 제거로 잘려나간 구간에 세그먼트 경계가 걸쳐있을 경우
+                        master_cuts.append(master_t)
+                        mapped = True
+                        break
+                    master_t += (k1 - k0)
+                if not mapped and keeps:
+                    master_cuts.append(master_t)
         except Exception as err:
             log(f"[track_crop] cuts.json 읽기 실패: {err}")
+    elif raw_cuts:
+        master_cuts.extend(raw_cuts)
 
-    # 비디오 실제 픽셀 변화 프레임으로 컷 경계 정밀 스냅
-    master_cuts = snap_cuts_to_visual(in_path, master_cuts, FPS)
+    # 비디오 실제 픽셀 변화 프레임으로 컷 경계 정밀 스냅 (세그먼트 전환점이 있을 때만)
+    if len(master_cuts) > 1:
+        master_cuts = snap_cuts_to_visual(in_path, master_cuts, FPS)
 
     master_cuts.append(total_duration)
     master_cuts = sorted(list(set(master_cuts)))
@@ -360,11 +388,35 @@ def main():
                     help="이 길이(초) 미만의 샷은 무조건 고정한다 (기본 1.8)")
     ap.add_argument("--pan-speed", type=float, default=480.0,
                     help="이동 샷의 등속 패닝 속도 px/s (기본 480)")
-    ap.add_argument("--static-lock", type=float, default=60.0,
-                    help="직전 정적 샷과 이 거리(px) 미만이면 같은 좌표로 락한다 (기본 60)")
+    ap.add_argument("--static-lock", type=float, default=160.0,
+                    help="직전 정적 샷과 이 거리(px) 미만이면 같은 좌표로 락한다 (기본 160). "
+                         "2026-09-15: 60 이면 같은 장면 점프컷에서 얼굴 검출 흔들림(±99px)만으로 크롭이 순간이동해 글리치로 보였다")
+    ap.add_argument("--carry-ratio", type=float, default=0.25,
+                    help="샷 경계 뒤에도 얼굴이 직전 크롭 중앙에서 crop_w×이 비율 안이면 직전 좌표를 이어 쓴다 (기본 0.25). "
+                         "2026-09-17: 이동 샷은 직전 끝 좌표를 무시하고 첫 프레임 얼굴로 순간이동해, 같은 화면 이음매에서 200~460px 튀었다")
+    ap.add_argument("--fixed-cx", type=float, default=None,
+                    help="카메라 중심 CX 좌표를 고정한다 (예: 1860). 지정 시 얼굴 추적을 건너뛰고 완벽한 정적 샷을 생성한다.")
+    ap.add_argument("--fixed-x", type=float, default=None,
+                    help="카메라 좌측 X 좌표를 직접 고정한다.")
     args = ap.parse_args()
 
     crop_w = args.crop_w
+
+    if args.fixed_cx is not None or args.fixed_x is not None:
+        cap = cv2.VideoCapture(args.in_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.isOpened() else 0
+        cap.release()
+        if total_frames <= 0:
+            total_frames = 1800
+        target_x = args.fixed_x if args.fixed_x is not None else int(round(args.fixed_cx - crop_w / 2.0))
+        target_x = int(np.clip(target_x, 0, 3840 - crop_w))
+        target_x = (target_x // 2) * 2
+        log(f"[track_crop] 고정 좌표 강제 적용: x={target_x} (cx={target_x + crop_w/2:.1f})")
+        x_frame = np.full(total_frames, target_x, dtype=int)
+        expr = f"{target_x:.1f}"
+        save_outputs(args, total_frames, x_frame, expr, [(0.0, float(target_x))], crop_w, 100.0)
+        return
+
     total_frames, samples, det_rate = detect_faces(
         args.in_path, args.model, args.sample_fps)
     total_dur = total_frames / float(FPS)
@@ -433,6 +485,7 @@ def main():
 
     cut_infos = []
     last_static_x = None
+    carry_px = args.carry_ratio * crop_w
 
     for c0, c1 in shots:
         dur = c1 - c0
@@ -451,8 +504,8 @@ def main():
             med_cx = float(np.median(clip_cx))
             cam_x = np.clip(med_cx - crop_w / 2.0, 0, 3840 - crop_w)
             cam_x = round(cam_x / 2.0) * 2.0
-            # 이전 정적 샷과 위치 차이가 미세할 때만(60px 미만) 동일 위치로 락(Lock)하여 불필요한 미세 흔들림만 방지
-            if last_static_x is not None and abs(cam_x - last_static_x) < args.static_lock:
+            # 이전 정적 샷과 위치 차이가 static_lock(기본 160px) 미만이면 동일 위치로 락(Lock)하여 불필요한 미세 흔들림만 방지
+            if last_static_x is not None and abs(cam_x - last_static_x) < max(args.static_lock, carry_px):
                 cam_x = last_static_x
             last_static_x = cam_x
             cut_infos.append(("static", c0, c1, cam_x))
@@ -465,6 +518,10 @@ def main():
             step = PAN_SPEED / FPS
             deadzone = 0.10 * crop_w  # ~120px (인물이 항상 중앙 10% 내에 잘 머물도록 좁힌 데드존)
             cam = np.clip(clip_cx[0] - crop_w / 2.0, 0, 3840 - crop_w)
+            # 직전 샷 끝 좌표에서 얼굴이 아직 안전 범위 안이면 거기서 출발해 등속으로 따라간다 (경계 순간이동 방지)
+            # 이동 샷은 곧 등속으로 따라잡으므로 얼굴이 크롭 안에 남는 한(40%) 이어 쓴다 — 정지 샷(25%)보다 넓다
+            if last_static_x is not None and abs(cam - last_static_x) < max(carry_px, 0.40 * crop_w):
+                cam = last_static_x
             out = np.empty(n_clip)
             for cf in range(n_clip):
                 target = np.clip(clip_cx[cf] - crop_w / 2.0, 0, 3840 - crop_w)
@@ -493,10 +550,10 @@ def main():
             idxs = rdp_linear(0, n_clip - 1, err=4.0)
             raw_pts = [(float(t_arr[idx]), float(out[idx])) for idx in idxs]
 
-            # 50px 미만의 미세 흔들림은 이전 정지 좌표로 스냅 (불필요한 미세 이동 방지)
+            # 15px 미만의 미세 흔들림만 이전 정지 좌표로 스냅 (불필요한 잔떨림 방지 & 부드러운 글라이드 유지)
             cleaned = [raw_pts[0]]
             for pt in raw_pts[1:]:
-                if abs(pt[1] - cleaned[-1][1]) < 50.0:
+                if abs(pt[1] - cleaned[-1][1]) < 15.0:
                     cleaned.append((pt[0], cleaned[-1][1]))
                 else:
                     cleaned.append(pt)

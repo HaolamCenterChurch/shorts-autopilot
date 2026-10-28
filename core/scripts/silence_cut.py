@@ -124,6 +124,41 @@ def build_delete_regions(runs, duration, pad, keep_gap, words, word_guard=False,
     return deletes
 
 
+RELEASE_DB = 26.0   # 말끝·첫소리 보호 임계 = 발화(10ms p90) - 이 값. G-I(발화-24dB)보다 2dB 엄하게
+EDGE_HOLD = 0.04    # 보호 임계 아래로 내려간 뒤에도 이만큼은 남긴다
+GH_SILENCE_DB = -42.0  # check_output.SILENCE_DB 와 같아야 한다(P4)
+QUIET_RUN = 15      # 보호 임계 아래가 이만큼(10ms 프레임) 이어져야 말꼬리가 끝난 것으로 본다 (EDGE_HOLD + G-I 검사창 0.1s 를 덮는다)
+
+
+def protect_soft_edges(deletes, db, times, release, duration, min_gain):
+    """★말끝이 작게 흐려지는 동안은 자르지 않는다 (오너 2026-10-03 "말이 끝나지 않았는데 자꾸 넘긴다").
+    무음 임계(발화-18dB)만 보면 한국어 문장 끝 '~요/~다'가 -40dB 근처로 흐려지는 꼬리가
+    무음으로 판정되고 pad(0.09s)만 남긴 채 잘려 나갔다(2026-10-02 B안 실측 2곳, 잘린 쪽 -40dB).
+    삭제 시작은 소리가 보호 임계 아래로 내려간 뒤로, 삭제 끝은 다음 첫소리가 보호 임계를
+    넘기 전으로 민다(이력 임계). 그러고도 min_gain 만큼 못 지우면 그 컷은 하지 않는다."""
+    if len(times) < 2:
+        return deletes
+    step = times[1] - times[0]
+    out = []
+    for a, b in deletes:
+        # 한 프레임만 조용해도 멈추면 잠깐 꺼졌다 다시 이어지는 말끝을 자른다 → QUIET_RUN 연속 조용을 요구
+        i0 = i = int(round(a / step))
+        while i < len(db) and times[i] < b and (db[i:i + QUIET_RUN] >= release).any():
+            i += 1
+        a2 = a if i == i0 else min(b, times[min(i, len(times) - 1)] + EDGE_HOLD)
+        j0 = j = min(len(db) - 1, int(round(b / step)))
+        while j > 0 and times[j] > a2 and (db[max(0, j - QUIET_RUN + 1):j + 1] >= release).any():
+            j -= 1
+        b2 = b if j == j0 else max(a2, times[j] - EDGE_HOLD)
+        if a2 != a or b2 != b:
+            log(f"[silence_cut] 말끝/첫소리 보호 [{a:.2f}~{b:.2f}] → [{a2:.2f}~{b2:.2f}]")
+        if a > 0 and b < duration and b2 - a2 < min_gain:
+            continue
+        if b2 > a2:
+            out.append((a2, b2))
+    return out
+
+
 def enforce_min_keep(deletes, duration, min_keep):
     """컷과 컷 사이에 min_keep 보다 짧은 조각이 남지 않게 한다.
 
@@ -261,6 +296,12 @@ def main():
 
     deletes = build_delete_regions(runs, duration, args.pad, args.keep_gap,
                                    words, args.word_guard, args.min_gain)
+    # 보호 임계는 check_output G-I 와 같은 잣대(10ms 프레임 p90 - 24dB)에서 여유 2dB 를 더 둔다(P4)
+    db10, times10 = frame_dbfs(audio, hop, hop)
+    speech10 = np.percentile(db10, 90)
+    #   단, G-H 가 무음으로 세는 크기(SILENCE_DB)까지 지키면 남긴 숨소리가 무음 갭으로 걸린다 → 그보다 낮추지 않는다
+    deletes = protect_soft_edges(deletes, db10, times10, max(speech10 - RELEASE_DB, GH_SILENCE_DB),
+                                 duration, args.min_gain)
 
     # ★청중 웃음소리, 리액션, 현장 분위기 보존 구간 가드
     if args.preserve:

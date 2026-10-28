@@ -47,14 +47,14 @@ def make_youtube_thumbnail(bg_image_path, badge_text, title_line1, title_line2, 
     if im.size != (1080, 1920):
         im = im.resize((1080, 1920), Image.LANCZOS)
 
-    if zoom < 0.999:
+    # 전체 해상도(1080x1920) 풀블리드: 레터박스나 여백 없이 화면을 100% 꽉 채운다.
+    if zoom > 1.001:
         w, h = im.size
         nw, nh = int(w * zoom), int(h * zoom)
         scaled = im.resize((nw, nh), Image.LANCZOS)
-        bg_color = im.getpixel((w // 2, 50))
-        canvas = Image.new("RGBA", (w, h), bg_color)
-        canvas.paste(scaled, ((w - nw) // 2, h - nh))
-        im = canvas
+        ox = (nw - w) // 2
+        oy = (nh - h) // 2
+        im = scaled.crop((ox, oy, ox + w, oy + h))
 
     # 상/하단 그라디언트
     grad = Image.new("RGBA", (1080, 1920), (0, 0, 0, 0))
@@ -104,12 +104,12 @@ def make_youtube_thumbnail(bg_image_path, badge_text, title_line1, title_line2, 
             y_l2 = 475
         else:
             # 티저 포함 표준 2단 훅
-            target_l1 = fs_l1 if fs_l1 > 0 else 82
-            target_l2 = fs_l2 if fs_l2 > 0 else 96
+            target_l1 = fs_l1 if fs_l1 > 0 else 84
+            target_l2 = fs_l2 if fs_l2 > 0 else 100
             font_l1 = get_fitted_font(FONT_B, title_line1, target_size=target_l1, max_width=940, min_size=54)
             font_l2 = get_fitted_font(FONT_B, title_line2, target_size=target_l2, max_width=940, min_size=60)
-            y_l1 = 365
-            y_l2 = 475
+            y_l1 = 370
+            y_l2 = 480
 
         l1_box = draw.textbbox((0, 0), title_line1, font=font_l1)
         l1_w = l1_box[2] - l1_box[0]
@@ -132,83 +132,84 @@ def make_youtube_thumbnail(bg_image_path, badge_text, title_line1, title_line2, 
     print(f"[generate_thumbnail] 유튜브 썸네일 저장: {out_path}")
 
 def make_instagram_thumbnail(bg_image_path, badge_text, title_line1, title_line2, teaser_text, out_clean_path, out_guide_path=None, zoom=1.0, fs_l1=0, fs_l2=0):
-    canvas = Image.new("RGB", (1080, 1350), (255, 255, 255))
-    pw, ph = 870, 1158
-    px, py = 105, 42
-    gx0, gy0, gx1, gy1 = 161, 164, 921, 1145 # 노란 가이드 규격 (760 x 981)
-
+    target_w, target_h = 1080, 1350
     frame = Image.open(bg_image_path).convert("RGB")
-    if zoom < 0.999:
-        fw, fh = frame.size
-        nw, nh = int(fw * zoom), int(fh * zoom)
-        scaled_f = frame.resize((nw, nh), Image.LANCZOS)
-        bg_col = frame.getpixel((fw // 2, 50))
-        new_frame = Image.new("RGB", (fw, fh), bg_col)
-        new_frame.paste(scaled_f, ((fw - nw) // 2, fh - nh))
-        frame = new_frame
-
     fw, fh = frame.size
-    crop_w = int(fh * (pw / ph))
-    off_x = (fw - crop_w) // 2
-    rf_crop = frame.crop((off_x, 0, off_x + crop_w, fh)).resize((pw, ph), Image.LANCZOS)
 
-    # 상단 딤 그라디언트
-    grad = Image.new("RGBA", (pw, ph), (0, 0, 0, 0))
+    # 1080x1350 전체 해상도 100% 풀블리드 (흰 테두리·카드 여백 없이 전체 해상도를 다 채움)
+    if fw == target_w and fh >= target_h:
+        y_offset = int((fh - target_h) * 0.28)
+        if y_offset + target_h > fh:
+            y_offset = fh - target_h
+        rf_crop = frame.crop((0, y_offset, target_w, y_offset + target_h))
+    else:
+        scale = max(target_w / fw, target_h / fh)
+        nw, nh = int(fw * scale), int(fh * scale)
+        scaled_f = frame.resize((nw, nh), Image.LANCZOS)
+        ox = (nw - target_w) // 2
+        oy = max(0, int((nh - target_h) * 0.28))
+        if oy + target_h > nh:
+            oy = nh - target_h
+        rf_crop = scaled_f.crop((ox, oy, ox + target_w, oy + target_h))
+
+    # 상단 딤 그라디언트 (1080x1350 전체 폭)
+    grad = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
     gdraw = ImageDraw.Draw(grad)
-    for y in range(500):
-        alpha = int(220 * ((500 - y) / 500) ** 1.3)
-        gdraw.line([(0, y), (pw, y)], fill=(0, 0, 0, alpha))
-    photo_img = Image.alpha_composite(rf_crop.convert("RGBA"), grad).convert("RGB")
-    canvas.paste(photo_img, (px, py))
+    for y in range(600):
+        alpha = int(220 * ((600 - y) / 600) ** 1.3)
+        gdraw.line([(0, y), (target_w, y)], fill=(0, 0, 0, alpha))
 
+    canvas = Image.alpha_composite(rf_crop.convert("RGBA"), grad).convert("RGB")
     draw = ImageDraw.Draw(canvas)
+
     has_l2 = bool(title_line2 and title_line2.strip())
     has_sub = bool(teaser_text and teaser_text.strip())
 
-    font_badge = ImageFont.truetype(FONT_B, 26)
     cx = 540
+    # 인스타 1:1 정방형 피드 안전영역(y 135 ~ 1215) 기준 배치
+    gy0 = 175
 
+    font_badge = ImageFont.truetype(FONT_B, 30)
     if badge_text:
         b_box = draw.textbbox((0, 0), badge_text, font=font_badge)
         bw, bh = b_box[2] - b_box[0], b_box[3] - b_box[1]
-        bx0, by0 = cx - bw // 2 - 16, gy0 + 20
-        draw.rounded_rectangle([bx0, by0, bx0 + bw + 32, by0 + bh + 14], radius=10, fill=(15, 15, 20, 220), outline=(255, 232, 67, 240), width=2)
-        draw.text((bx0 + 16, by0 + 6), badge_text, font=font_badge, fill=(255, 232, 67, 255))
+        bx0, by0 = cx - bw // 2 - 20, gy0 + 20
+        draw.rounded_rectangle([bx0, by0, bx0 + bw + 40, by0 + bh + 16], radius=12, fill=(15, 15, 20, 220), outline=(255, 232, 67, 240), width=2)
+        draw.text((bx0 + 20, by0 + 7), badge_text, font=font_badge, fill=(255, 232, 67, 255))
 
     if not has_l2:
         # 단일행 훅 인스타 규격
-        target_size = int(fs_l1 * 0.72) if fs_l1 > 0 else 76
+        target_size = int(fs_l1 * 0.72) if fs_l1 > 0 else 80
         font_l1 = get_fitted_font(FONT_B, title_line1, target_size=target_size, max_width=740, min_size=40)
         l1_box = draw.textbbox((0, 0), title_line1, font=font_l1)
-        draw_text_with_shadow(draw, (cx - (l1_box[2] - l1_box[0]) // 2, gy0 + 105), title_line1, font=font_l1, fill_color=(255, 232, 67, 255), shadow_offset=5)
+        draw_text_with_shadow(draw, (cx - (l1_box[2] - l1_box[0]) // 2, gy0 + 110), title_line1, font=font_l1, fill_color=(255, 232, 67, 255), shadow_offset=6)
     else:
         if not has_sub:
-            # 티저 없는 2단 대형 훅
-            target_l1 = int(fs_l1 * 0.68) if fs_l1 > 0 else 80
-            target_l2 = int(fs_l2 * 0.68) if fs_l2 > 0 else 96
+            target_l1 = int(fs_l1 * 0.68) if fs_l1 > 0 else 86
+            target_l2 = int(fs_l2 * 0.68) if fs_l2 > 0 else 102
             font_l1 = get_fitted_font(FONT_B, title_line1, target_size=target_l1, max_width=740, min_size=40)
             font_l2 = get_fitted_font(FONT_B, title_line2, target_size=target_l2, max_width=740, min_size=40)
-            y_l1 = gy0 + 75
-            y_l2 = gy0 + 170
+            y_l1 = gy0 + 85
+            y_l2 = gy0 + 185
         else:
-            font_l1 = get_fitted_font(FONT_B, title_line1, target_size=58, max_width=740, min_size=36)
-            font_l2 = get_fitted_font(FONT_B, title_line2, target_size=68, max_width=740, min_size=40)
-            y_l1 = gy0 + 80
-            y_l2 = gy0 + 155
+            font_l1 = get_fitted_font(FONT_B, title_line1, target_size=72, max_width=740, min_size=40)
+            font_l2 = get_fitted_font(FONT_B, title_line2, target_size=86, max_width=740, min_size=40)
+            y_l1 = gy0 + 85
+            y_l2 = gy0 + 180
 
         l1_box = draw.textbbox((0, 0), title_line1, font=font_l1)
-        draw_text_with_shadow(draw, (cx - (l1_box[2] - l1_box[0]) // 2, y_l1), title_line1, font=font_l1, fill_color=(255, 255, 255, 255), shadow_offset=5)
+        draw_text_with_shadow(draw, (cx - (l1_box[2] - l1_box[0]) // 2, y_l1), title_line1, font=font_l1, fill_color=(255, 255, 255, 255), shadow_offset=6)
 
         l2_box = draw.textbbox((0, 0), title_line2, font=font_l2)
-        draw_text_with_shadow(draw, (cx - (l2_box[2] - l2_box[0]) // 2, y_l2), title_line2, font=font_l2, fill_color=(255, 232, 67, 255), shadow_offset=5)
+        draw_text_with_shadow(draw, (cx - (l2_box[2] - l2_box[0]) // 2, y_l2), title_line2, font=font_l2, fill_color=(255, 232, 67, 255), shadow_offset=6)
 
     if has_sub:
-        font_sub = get_fitted_font(FONT_SANS, teaser_text, target_size=28, max_width=740, min_size=20)
+        font_sub = get_fitted_font(FONT_SANS, teaser_text, target_size=32, max_width=740, min_size=20)
         s_box = draw.textbbox((0, 0), teaser_text, font=font_sub)
         sw, sh = s_box[2] - s_box[0], s_box[3] - s_box[1]
-        sx0, sy0 = cx - sw // 2 - 14, gy0 + 240
-        draw.rounded_rectangle([sx0, sy0, sx0 + sw + 28, sy0 + sh + 12], radius=8, fill=(0, 0, 0, 180))
-        draw.text((cx - sw // 2, gy0 + 245), teaser_text, font=font_sub, fill=(235, 240, 250, 255))
+        sx0, sy0 = cx - sw // 2 - 18, gy0 + 285
+        draw.rounded_rectangle([sx0, sy0, sx0 + sw + 36, sy0 + sh + 14], radius=10, fill=(0, 0, 0, 180))
+        draw.text((cx - sw // 2, gy0 + 291), teaser_text, font=font_sub, fill=(235, 240, 250, 255))
 
     canvas.save(out_clean_path, "JPEG", quality=96)
     print(f"[generate_thumbnail] 인스타 클린 커버 저장: {out_clean_path}")
@@ -216,7 +217,8 @@ def make_instagram_thumbnail(bg_image_path, badge_text, title_line1, title_line2
     if out_guide_path:
         canvas_guide = canvas.copy()
         draw_g = ImageDraw.Draw(canvas_guide)
-        draw_g.rectangle([gx0, gy0, gx1, gy1], outline=(255, 220, 0), width=4)
+        gx0, gy0_g, gx1, gy1_g = 160, 184, 920, 1165
+        draw_g.rectangle([gx0, gy0_g, gx1, gy1_g], outline=(255, 220, 0), width=4)
         canvas_guide.save(out_guide_path, "JPEG", quality=96)
         print(f"[generate_thumbnail] 인스타 가이드 커버 저장: {out_guide_path}")
 

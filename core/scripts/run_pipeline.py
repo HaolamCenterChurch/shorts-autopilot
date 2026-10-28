@@ -16,6 +16,7 @@ WHISPER_BIN = env_discovery.get_whisper_bin()
 WHISPER_MODEL = env_discovery.get_whisper_model()
 YUNET_MODEL = env_discovery.get_yunet_model()
 
+PYTHON_BIN = env_discovery.get_python()
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -24,7 +25,7 @@ def log(msg):
 
 
 def run_module(script_name, args_list):
-    cmd = [sys.executable, os.path.join(HERE, script_name)] + args_list
+    cmd = [PYTHON_BIN, os.path.join(HERE, script_name)] + args_list
     log(f"[run_pipeline] 실행: {script_name} {' '.join(args_list)}")
     subprocess.run(cmd, check=True)
 
@@ -130,8 +131,61 @@ def transcribe_words(video_path, workdir, prefix):
     return words_path, words
 
 
+def extend_segment_tails(src, segments, max_ext=0.6):
+    """★구간 끝에서 말꼬리를 자르지 않는다 (오너 2026-10-03 "말이 끝나지 않았는데 자꾸 넘긴다").
+    손으로 잡은 구간 끝이 '~요/~다'가 작게(-42dB) 이어지는 중간에 걸리는 일이 반복됐다
+    (2026-10-02 B안 2691.10s: 끝 뒤 0.1~0.35s 에 '요'가 남아 있었다).
+    끝 뒤를 원본에서 읽어, 소리가 '발화-28dB' 아래로 0.15초 이상 내려간 지점까지 끝을 민다.
+    다음 말 첫소리(발화-12dB 이상)를 만나면 그 직전에서 멈추고, 최대 max_ext 초까지만 민다.
+    바로 뒤(1초 안)에 다른 구간이 이어지는 끝은 cut_fillers 가 일부러 자른 이음매라 건드리지 않는다."""
+    import numpy as np
+    out = []
+    starts = [s for s, _ in segments]
+    for s, e in segments:
+        if any(e <= ns < e + 1.0 for ns in starts):
+            out.append([s, e]); continue
+        look0 = max(s, e - 2.0)
+        cmd = [FFMPEG, "-v", "error", "-ss", f"{look0:.3f}", "-t", f"{e - look0 + max_ext + 0.2:.3f}",
+               "-i", src, "-vn", "-ac", "1", "-ar", "16000", "-f", "f32le", "-"]
+        x = np.frombuffer(subprocess.run(cmd, capture_output=True).stdout, np.float32)
+        hop = 160
+        n = len(x) // hop
+        if n < 20:
+            out.append([s, e]); continue
+        db = np.array([20 * np.log10(np.sqrt(np.mean(x[i * hop:(i + 1) * hop] ** 2)) + 1e-9) for i in range(n)])
+        k0 = int(round((e - look0) / 0.01))
+        ref = np.percentile(db[:k0], 90) if k0 > 10 else db.max()
+        release, onset = ref - 28.0, ref - 12.0
+        quiet, new_e, last_quiet_start = 0, None, None
+        for k in range(k0, min(n, k0 + int(max_ext / 0.01))):
+            if db[k] >= onset:                       # 다음 말이 시작됐다 → 그 앞 조용한 곳까지만
+                if last_quiet_start is not None:
+                    new_e = look0 + last_quiet_start * 0.01 + 0.05
+                break
+            if db[k] < release:
+                if quiet == 0:
+                    last_quiet_start = k
+                quiet += 1
+            else:
+                quiet = 0
+            if quiet >= 15:                          # 0.15초 조용 = 말꼬리가 끝났다
+                new_e = look0 + last_quiet_start * 0.01 + 0.05
+                break
+        if last_quiet_start == k0 and new_e is not None:
+            new_e = e                                # 이미 조용한 곳에서 끝난다
+        if new_e is None:
+            log(f"[stage a] ⚠구간 끝 {e:.2f}s 뒤 {max_ext}s 안에 말꼬리가 끝나지 않는다 — 플랜 끝을 확인하라")
+            new_e = e
+        new_e = max(e, round(new_e, 3))
+        if new_e > e + 0.02:
+            log(f"[stage a] 말꼬리 연장 {e:.2f} → {new_e:.2f}s (+{new_e - e:.2f})")
+        out.append([s, new_e])
+    return out
+
+
 def stage_a(src, plan, workdir, plan_path=None):
     slug = plan["slug"]
+    plan["segments"] = extend_segment_tails(src, plan["segments"])
     segments_str = ";".join(f"{s}-{e}" for s, e in plan["segments"])
 
     raw_path = os.path.join(workdir, f"{slug}_raw.mov")
@@ -187,7 +241,10 @@ def stage_a(src, plan, workdir, plan_path=None):
     for key, flag in (("static_spread", "--static-spread"),
                       ("static_mindur", "--static-mindur"),
                       ("static_lock", "--static-lock"),
-                      ("pan_speed", "--pan-speed")):
+                      ("pan_speed", "--pan-speed"),
+                      ("carry_ratio", "--carry-ratio"),
+                      ("fixed_cx", "--fixed-cx"),
+                      ("fixed_x", "--fixed-x")):
         if key in tr:
             track_args.extend([flag, str(tr[key])])
     run_module("track_crop.py", track_args)
@@ -259,6 +316,33 @@ def stage_b(plan, workdir, outdir, chunks_path, state=None):
             ass_args += ["--top-title-margin", str(subs["top_title_margin"])]
     run_module("make_ass.py", ass_args)
 
+    # plan 의 effects 또는 chunks 의 hl(하이라이트) 구간 기반 줌인 effects.json 자동 생성
+    # ★매 렌더마다 새로 만든다 (2026-09-15: 파일이 있으면 건너뛰던 탓에 Stage A 재실행 후에도
+    #  옛 타임라인의 줌 시각이 남아 A·B·E 줌이 발화 중간에 켜지고 빠졌다). 수동 지정은 plan.effects.zooms.
+    effects_path = os.path.join(workdir, f"{slug}_effects.json")
+    if True:
+        from make_ass import match_chunks_to_words
+        import zoom_plan
+        with open(chunks_path, "r", encoding="utf-8") as f:
+            chunks = json.load(f)
+        with open(master_words_path, "r", encoding="utf-8") as f:
+            mwords = json.load(f)
+        matched = match_chunks_to_words(mwords, chunks)
+        explicit_zooms = (plan.get("effects") or {}).get("zooms")
+        if explicit_zooms is not None:
+            zooms = explicit_zooms
+        else:
+            # 문장 끝까지 유지 · 이음매에서 전환 · 강조가 이어지면 2단 — 규칙은 zoom_plan.py docstring
+            shot_cuts = zoom_plan.master_shot_cuts(workdir, slug, master_path, plan)
+            jump_points = zoom_plan.master_jump_points(master_path)
+            zooms = zoom_plan.plan_zooms(chunks, matched, shot_cuts, duration, jump_points)
+        with open(effects_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "zooms": zooms,
+                "stickers": (plan.get("effects") or {}).get("stickers", [])
+            }, f, ensure_ascii=False, indent=2)
+        log(f"[run_pipeline] 줌인 effects.json 자동 생성 완료: 줌인 {len(zooms)}곳 -> {effects_path}")
+
     os.makedirs(outdir, exist_ok=True)
     final_path = os.path.join(outdir, f"{slug}.mp4")
     rv_args = ["--in", master_path, "--track", track_json, "--ass", ass_path,
@@ -271,6 +355,8 @@ def stage_b(plan, workdir, outdir, chunks_path, state=None):
             rv_args += ["--band-bottom", str(subs["band_bottom"])]
         if subs.get("band_crop_y") is not None:
             rv_args += ["--band-crop-y", str(subs["band_crop_y"])]
+        if "zoom_anchor_y" in subs:
+            rv_args += ["--zoom-anchor-y", str(subs["zoom_anchor_y"])]
     run_module("render_vertical.py", rv_args)
 
     script_path = os.path.join(workdir, f"{slug}_script.txt")

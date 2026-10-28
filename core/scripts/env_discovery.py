@@ -16,6 +16,31 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(os.path.dirname(HERE))
 
+def get_python() -> str:
+    """cv2, numpy, PIL이 설치된 Python 인터프리터 자동 탐색."""
+    if os.environ.get("PYTHON_BIN"):
+        return os.environ["PYTHON_BIN"]
+    
+    try:
+        import cv2  # noqa: F401
+        return sys.executable
+    except ImportError:
+        pass
+    
+    candidate_venvs = [
+        os.path.join(PROJECT_ROOT, ".venv-cv", "bin", "python3"),
+        os.path.join(PROJECT_ROOT, ".venv", "bin", "python3"),
+        os.path.join(PROJECT_ROOT, "venv", "bin", "python3"),
+        os.path.join(HERE, ".venv", "bin", "python3"),
+        os.path.expanduser("~/.venv-cv/bin/python3"),
+        os.path.expanduser("~/.venv/bin/python3"),
+    ]
+    for p in candidate_venvs:
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    
+    return sys.executable
+
 def find_binary(name: str, env_key: str = None, extra_globs: list[str] = None) -> str:
     """바이너리 실행 파일 경로 탐색."""
     if env_key and os.environ.get(env_key):

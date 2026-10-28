@@ -37,6 +37,7 @@ def log(msg):
 
 def normalize(text):
     """한글/영숫자만 남긴 정규화 문자열."""
+    text = re.sub(r"\\N", "", text or "")
     return re.sub(r"[^0-9A-Za-z가-힣]", "", text or "")
 
 
@@ -95,9 +96,56 @@ def match_chunks_to_words(words, chunks):
     return results
 
 
+def get_font_measurer(size=90):
+    try:
+        from PIL import ImageFont
+        return ImageFont.truetype("/System/Library/Fonts/AppleSDGothicNeo.ttc", size)
+    except Exception:
+        return None
+
+
+_FONT_MEASURER = None
+
+
+def get_text_width(clean_text, font_size=90):
+    global _FONT_MEASURER
+    if _FONT_MEASURER is None:
+        _FONT_MEASURER = get_font_measurer(font_size)
+    if _FONT_MEASURER:
+        bbox = _FONT_MEASURER.getbbox(clean_text)
+        return bbox[2] - bbox[0]
+    w = 0
+    for ch in clean_text:
+        if "\uac00" <= ch <= "\ud7a3":
+            w += 78 * (font_size / 90.0)
+        elif ch.isspace():
+            w += 25 * (font_size / 90.0)
+        else:
+            w += 48 * (font_size / 90.0)
+    return int(w)
+
+
+def auto_fit_korean_text(ko, fs=90, max_w=960):
+    if not ko:
+        return ""
+    # 자막은 무조건 1줄(단독 한 줄 자막) 원칙: \N 및 개행을 공백으로 단일행화
+    clean_line = ko.replace(r"\N", " ").replace("\n", " ").strip()
+    clean_line = re.sub(r"\s+", " ", clean_line)
+    text_only = re.sub(r"\{[^}]*\}", "", clean_line).strip()
+    w = get_text_width(text_only, fs)
+    if w > max_w:
+        # 줄바꿈(\N)을 절대 넣지 않고, 가로 폭에 맞추어 폰트 크기만 스케일 다운 (최소 60pt)
+        scale = max_w / max(w, 1)
+        target_fs = max(int(fs * scale) - 2, 60)
+        return r"{\fs" + str(target_fs) + r"}" + clean_line + r"{\fs" + str(fs) + r"}"
+    return clean_line
+
+
 def build_dialogue_text(en, ko, hl, no_en=False, fs=68, pop=True):
     ko = ko or ""
     en = "" if no_en else (en or "")
+    # 화면 넘침 방지 자동 피팅 (1080px 기준 960px 이내 보장)
+    ko = auto_fit_korean_text(ko, fs=fs, max_w=960)
     if hl and not pop:
         # 박스 자막: 박스가 같이 출렁여 어색하므로 팝 없이 골드 컬러로만 강조 (오너 2026-09-19)
         ko_tag = r"{\fs" + str(fs) + r"\c&H00E5FF&}"
@@ -127,14 +175,14 @@ def main():
                     help="영문 자막을 렌더하지 않는다 (한글 1단)")
     ap.add_argument("--font-size", type=int, default=68,
                     help="한글 자막 폰트 크기 (기본 68)")
-    ap.add_argument("--margin-v", type=int, default=470,
-                    help="자막 하단 여백 px (기본 470)")
+    ap.add_argument("--margin-v", type=int, default=360,
+                    help="자막 하단 여백 px (기본 360)")
     ap.add_argument("--badge", default=None,
                     help="상단 밴드에 얹을 작은 뱃지 문구 (옵션)")
     ap.add_argument("--badge-margin", type=int, default=205,
                     help="뱃지의 화면 위쪽 여백 px (기본 205)")
-    ap.add_argument("--margin-lr", type=int, default=60,
-                    help="자막 좌우 여백 px (기본 60)")
+    ap.add_argument("--margin-lr", type=int, default=90,
+                    help="자막 좌우 여백 px (기본 90)")
     ap.add_argument("--outline", type=float, default=4.0,
                     help="자막 테두리(스트로크) 두께. 0 이면 테두리 없음 (기본 4.0)")
     ap.add_argument("--box", action="store_true",

@@ -44,6 +44,8 @@ def main():
                     help="상단에 만들 검정 밴드 높이 px. 0 이면 기존처럼 9:16 꽉 채운다")
     ap.add_argument("--zoom-out", type=float, default=1.0,
                     help="크롭 폭을 이 배율로 넓혀 화면을 줌아웃한다 (1.0 = 그대로)")
+    ap.add_argument("--zoom-anchor-y", type=float, default=0.5,
+                    help="줌인 세로 기준점 (0=위 끝 고정, 0.5=가운데). 헤드룸을 줄였으면 0 — 가운데면 정수리가 잘린다 (2026-09-30)")
     ap.add_argument("--band-bottom", type=int, default=0,
                     help="하단에 만들 검정 밴드 높이 px (자막을 여기에 내릴 때)")
     ap.add_argument("--band-crop-y", type=int, default=None,
@@ -94,11 +96,13 @@ def main():
     sticker_inputs = []
     for st in stickers:
         st_name = st.get("name")
-        st_path = os.path.join(STICKERS_DIR, f"{st_name}.png")
-        if os.path.exists(st_path):
-            inputs.extend(["-i", st_path])
+        st_path = st.get("path") or (os.path.join(STICKERS_DIR, f"{st_name}.png") if st_name else None)
+        if st_path and os.path.exists(st_path):
+            inputs.extend(["-i", os.path.abspath(st_path)])
             sticker_inputs.append((input_idx, st))
             input_idx += 1
+        else:
+            log(f"[경고] 스티커 파일을 찾을 수 없음: {st_path}")
 
     # Filter Complex 구성
     filter_chains = []
@@ -110,7 +114,7 @@ def main():
         new_w = int(round(crop_w * args.zoom_out / 2.0) * 2)
         new_w = min(new_w, 3840)
         off = (new_w - crop_w) / 2.0
-        expr = f"max(0\\,min({3840 - new_w}\\,({expr})-{off:.1f}))"
+        expr = f"2*trunc(max(0\\,min({3840 - new_w}\\,({expr})-{off:.1f}))/2)"
         crop_w = new_w
 
     if args.band_top > 0:
@@ -123,28 +127,49 @@ def main():
         cy = max(0, min(cy, 2160 - crop_h))
         filter_chains.append(
             f"[0:v]crop=w={crop_w}:h={crop_h}:x='{expr}':y={cy},"
-            f"scale=1080:{vid_h}:flags=lanczos,"
-            f"pad=1080:1920:0:{args.band_top}:black[v_base]")
+            f"scale=1080:{vid_h}:flags=lanczos[v_crop]")
+        cur_v = "v_crop"
+
+        # 2. 줌인 (Punch-in Zoom: 중앙 영상 영역만 1.14배 확대, 블랙 밴드는 고정)
+        if zoom_times:
+            # [[t0,t1]] 또는 [[t0,t1,배율]] (zoom_plan.py). 경계를 프레임 중간값에 맞춰
+            # 이음매 프레임에서 정확히 바뀌게 한다 — 한 프레임 어긋나면 그 자체가 튀어 보인다 (2026-09-15)
+            terms = [f"{(z[2] if len(z) > 2 else 1.14) - 1:.3f}"
+                     f"*gte(it,{(round(z[0] * 30) - 0.5) / 30:.4f})"
+                     f"*lt(it,{(round(z[1] * 30) - 0.5) / 30:.4f})" for z in zoom_times]
+            zoom_expr = f"min(1.3,1+{'+'.join(terms)})"
+            filter_chains.append(
+                f"[{cur_v}]zoompan=z='{zoom_expr}':d=1:x='iw/2-(iw/zoom/2)':y='(ih-ih/zoom)*{args.zoom_anchor_y:.3f}':s=1080x{vid_h}:fps=30[v_zoomed]"
+            )
+            cur_v = "v_zoomed"
+
+        # 상하단 밴드 패딩
+        filter_chains.append(f"[{cur_v}]pad=1080:1920:0:{args.band_top}:black[v_base]")
+        cur_v = "v_base"
     else:
         filter_chains.append(f"[0:v]crop=w={crop_w}:h=2160:x='{expr}':y=0,scale=1080:1920:flags=lanczos[v_base]")
-    cur_v = "v_base"
-
-    # 2. 줌인 (Punch-in Zoom)
-    if zoom_times:
-        conds = [f"between(it,{z[0]:.2f},{z[1]:.2f})" for z in zoom_times]
-        zoom_expr = f"if({'+'.join(conds)},1.14,1.0)"
-        filter_chains.append(
-            f"[{cur_v}]zoompan=z='{zoom_expr}':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920:fps=30[v_zoomed]"
-        )
-        cur_v = "v_zoomed"
+        cur_v = "v_base"
+        if zoom_times:
+            # [[t0,t1]] 또는 [[t0,t1,배율]] (zoom_plan.py). 경계를 프레임 중간값에 맞춰
+            # 이음매 프레임에서 정확히 바뀌게 한다 — 한 프레임 어긋나면 그 자체가 튀어 보인다 (2026-09-15)
+            terms = [f"{(z[2] if len(z) > 2 else 1.14) - 1:.3f}"
+                     f"*gte(it,{(round(z[0] * 30) - 0.5) / 30:.4f})"
+                     f"*lt(it,{(round(z[1] * 30) - 0.5) / 30:.4f})" for z in zoom_times]
+            zoom_expr = f"min(1.3,1+{'+'.join(terms)})"
+            filter_chains.append(
+                f"[{cur_v}]zoompan=z='{zoom_expr}':d=1:x='iw/2-(iw/zoom/2)':y='(ih-ih/zoom)*{args.zoom_anchor_y:.3f}':s=1080x1920:fps=30[v_zoomed]"
+            )
+            cur_v = "v_zoomed"
 
     # 3. 스티커 오버레이
     for i, (s_idx, s_info) in enumerate(sticker_inputs):
         t0 = s_info["t0"]
         t1 = s_info["t1"]
+        x_expr = s_info.get("x", "(W-w)/2")
+        y_expr = s_info.get("y", 1260)
         next_v = f"v_stk_{i}"
         filter_chains.append(
-            f"[{cur_v}][{s_idx}:v]overlay=x=(W-w)/2:y=1260:enable='between(t,{t0:.2f},{t1:.2f})'[{next_v}]"
+            f"[{cur_v}][{s_idx}:v]overlay=x={x_expr}:y={y_expr}:enable='between(t,{t0:.2f},{t1:.2f})'[{next_v}]"
         )
         cur_v = next_v
 

@@ -56,7 +56,8 @@ def concat_reencode(part_paths, out_path, workdir):
     list_path = os.path.join(workdir, "_concat_list.txt")
     with open(list_path, "w", encoding="utf-8") as f:
         for p in part_paths:
-            escaped = p.replace("'", "'\\''")
+            abs_p = os.path.abspath(p)
+            escaped = abs_p.replace("'", "'\\''")
             f.write(f"file '{escaped}'\n")
     cmd = [FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", list_path]
     cmd += ENCODE_ARGS + [out_path]
